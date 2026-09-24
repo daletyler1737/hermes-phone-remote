@@ -3,7 +3,7 @@
  * ---------------------------------------------------------------------------
  * 目的：把「手机远程聊天」做成桌面版内置入口（替代 ekko 的扫码配对收费功能）。
  * 底层零自研：直接复用 Hermes 自带 dashboard（手机浏览器打开 http://<LAN-IP>:9119/），
- * 本插件只负责：① 出二维码 ② 给地址/账号/密码 ③ 一键打开本机面板。
+ * 本插件只负责：① 出二维码 ② 给地址/账号/密码 ③ 一键打开本机面板 ④ 探测 IP 与服务状态。
  *
  * 入口三处：
  *   · Ctrl/⌘+K 搜「连接手机」（PALETTE_AREA）
@@ -12,6 +12,8 @@
  *
  * 注意：插件运行在受限沙箱里，只能 import '@hermes/plugin-sdk' / 'react' /
  * 'react/jsx-runtime'，且没有 JSX 编译 —— 所有元素都写成 jsx()/jsxs() 调用。
+ * ctx.os 只开放 notify / openExternal / revealPath / writeClipboard，
+ * 拿不到 shell，起服务那步只能靠外面的启动脚本（本页给按钮复制路径）。
  */
 import {
   PALETTE_AREA,
@@ -24,7 +26,7 @@ import {
   host,
   useValue
 } from '@hermes/plugin-sdk'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 /* ─── 内联二维码编码器 ───────────────────────────────────────────────────────
@@ -2419,6 +2421,79 @@ function go(path) {
   return false
 }
 
+/* ─── 局域网 IP 自动探测 ─────────────────────────────────────────────────
+   插件沙箱不给网络枚举 API，但 WebRTC 的 ICE 候选里带着本机内网地址；
+   不依赖任何外部服务。拿不到就返回 null（用户仍可手填）。 */
+function detectLanIp() {
+  return new Promise(resolve => {
+    let done = false
+    const finish = value => {
+      if (done) return
+      done = true
+      resolve(value)
+    }
+    const timer = setTimeout(() => finish(null), 2500)
+    try {
+      const pc = new RTCPeerConnection({ iceServers: [] })
+      pc.createDataChannel('probe')
+      pc.onicecandidate = e => {
+        const cand = e && e.candidate && e.candidate.candidate
+        if (!cand) {
+          // 候选收集结束还没拿到内网地址（或被 mDNS 混淆）→ 放弃
+          clearTimeout(timer)
+          return finish(null)
+        }
+        const m = /([0-9]{1,3}([.][0-9]{1,3}){3})/.exec(cand)
+        if (m && m[1].indexOf('127.') !== 0 && m[1].indexOf('169.254.') !== 0) {
+          clearTimeout(timer)
+          try {
+            pc.close()
+          } catch {
+            /* 无所谓 */
+          }
+          finish(m[1])
+        }
+      }
+      pc.createOffer()
+        .then(o => pc.setLocalDescription(o))
+        .catch(() => {
+          clearTimeout(timer)
+          finish(null)
+        })
+    } catch {
+      clearTimeout(timer)
+      finish(null)
+    }
+  })
+}
+
+/* ─── 服务在线探测 ───────────────────────────────────────────────────────
+   no-cors 模式：读不到状态码，但「连得上」就说明 9119 在监听。
+   浏览器 CSP 若拦掉请求会走 catch，此时给「未检测到」而不是误报在线。 */
+function useServiceStatus(url) {
+  const [state, setState] = useState({ phase: 'checking', at: 0 })
+  const [nonce, setNonce] = useState(0)
+  useEffect(() => {
+    let alive = true
+    const probe = async () => {
+      try {
+        await fetch(url, { mode: 'no-cors', cache: 'no-store' })
+        if (alive) setState({ phase: 'online', at: Date.now() })
+      } catch {
+        if (alive) setState({ phase: 'offline', at: Date.now() })
+      }
+    }
+    setState({ phase: 'checking', at: Date.now() })
+    probe()
+    const id = setInterval(probe, 5000)
+    return () => {
+      alive = false
+      clearInterval(id)
+    }
+  }, [url, nonce])
+  return [state, () => setNonce(n => n + 1)]
+}
+
 /* ─── 样式（一律走主题变量，深浅色自动跟随）───────────────────────────── */
 const S = {
   root: {
@@ -2466,7 +2541,18 @@ const S = {
   },
   grid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '10px', marginTop: '10px' },
   field: { display: 'flex', alignItems: 'center', gap: '8px' },
-  fieldKey: { color: 'var(--ui-text-secondary)', width: '70px', flex: '0 0 auto' }
+  fieldKey: { color: 'var(--ui-text-secondary)', width: '70px', flex: '0 0 auto' },
+  statusBar: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    flexWrap: 'wrap',
+    padding: '7px 10px',
+    borderRadius: '8px',
+    background: 'var(--chrome-action-hover)',
+    fontSize: '12px'
+  },
+  dot: { width: '8px', height: '8px', borderRadius: '50%', flex: '0 0 auto' }
 }
 
 /* ─── 二维码渲染：把矩阵按行合并成一条 SVG path ───────────────────────── */
@@ -2542,12 +2628,33 @@ function PhonePage({ ctx }) {
   const [revealed, setRevealed] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [draft, setDraft] = useState(null)
+  const [ipHint, setIpHint] = useState(null)
 
   const link = 'http://' + cfg.ip + ':' + cfg.port + '/'
   const localLink = 'http://127.0.0.1:' + cfg.port + '/'
   const d = draft || cfg
 
+  const [status, recheck] = useServiceStatus('http://127.0.0.1:' + cfg.port + '/api/status')
+
+  // 只在挂载时探测一次本机内网 IP；探测失败就什么都不显示，用户仍能手填。
+  useEffect(() => {
+    let alive = true
+    detectLanIp().then(ip => {
+      if (alive && ip && ip !== $cfg.get().ip) setIpHint(ip)
+    })
+    return () => {
+      alive = false
+    }
+  }, [])
+
   const edit = patch => setDraft({ ...d, ...patch })
+
+  const statusText =
+    status.phase === 'online'
+      ? '服务运行中 · ' + localLink
+      : status.phase === 'checking'
+        ? '正在检测服务…'
+        : '未检测到服务（9119 没在跑，或浏览器拦了探测）'
 
   return jsxs('div', {
     style: S.root,
@@ -2559,6 +2666,33 @@ function PhonePage({ ctx }) {
             style: S.sub,
             children: '手机和电脑连同一个 Wi-Fi 就行：不用装 App、不用数据线，也不花 ekko 那笔钱。'
           })
+        ]
+      }),
+
+      jsxs('div', {
+        style: S.statusBar,
+        children: [
+          jsx('span', {
+            style: {
+              ...S.dot,
+              background:
+                status.phase === 'online' ? 'var(--ui-accent)' : 'var(--ui-text-quaternary)'
+            }
+          }),
+          jsx('span', { children: statusText }),
+          jsx(Button, { variant: 'text', size: 'inline', onClick: recheck, children: '重新检测' }),
+          ipHint
+            ? jsx(Button, {
+                variant: 'secondary',
+                size: 'inline',
+                onClick: () => {
+                  saveCfg({ ...cfg, ip: ipHint })
+                  setIpHint(null)
+                  os.notify('已把局域网 IP 更新为 ' + ipHint, 'info')
+                },
+                children: '检测到本机 IP：' + ipHint + '，点此使用'
+              })
+            : null
         ]
       }),
 
@@ -2653,10 +2787,10 @@ function PhonePage({ ctx }) {
           jsx('span', { children: '·' }),
           jsxs('span', {
             children: [
-              jsx('b', { children: '「打开本机面板」打不开？' }),
+              jsx('b', { children: '状态是「未检测到」？' }),
               ' 说明后台服务没在跑 —— 双击脚本目录里的 ',
               jsx('code', { children: '启动手机网页-Start-Phone-Web.bat' }),
-              ' 再试（服务监听 0.0.0.0:',
+              ' 再点「重新检测」（服务监听 0.0.0.0:',
               cfg.port,
               '，防火墙入站规则 ',
               jsx('code', { children: 'Hermes Phone Chat ' + cfg.port }),
@@ -2772,7 +2906,7 @@ export default {
   register(ctx) {
     // 加载探针：宿主把 renderer console 转发进 logs/desktop.log，
     // 这行日志是「插件确实被加载」的外部可验证证据。
-    console.log('[phone-remote] loaded v1 — 连接手机插件已注册')
+    console.log('[phone-remote] loaded v2 — 连接手机插件已注册（状态灯 + IP 探测）')
     try {
       store = ctx.storage
     } catch {
