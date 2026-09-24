@@ -52,6 +52,21 @@ hermes config get dashboard.basic_auth
   `Reload desktop plugins` from the command palette.
 - The QR SVG must stay black-on-white (never theme-tinted) or phones fail to scan.
 
+## JS runtimes
+
+Build and verify scripts use only standard ESM plus `node:fs` — **no npm dependencies**,
+so any of the three runtimes runs them unchanged:
+
+```bash
+node scripts/verify_qr.mjs
+bun  scripts/verify_qr.mjs
+deno run --allow-read scripts/verify_qr.mjs
+```
+
+All three produce an identical matrix for the default URL (25x25, dark=332/625).
+Verified on node 22.22.3 / bun 1.4.2 / deno 2.9.6
+(`npm i -g bun deno --registry=https://registry.npmmirror.com`).
+
 ## Repo layout
 
 ```

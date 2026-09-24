@@ -36,7 +36,7 @@ import { jsx, jsxs } from 'react/jsx-runtime'
 const makeQr = (function () {
   const module = { exports: {} }
   const exports = module.exports
-  //---------------------------------------------------------------------
+//---------------------------------------------------------------------
 //
 // QR Code Generator for JavaScript
 //
@@ -2340,7 +2340,7 @@ var qrcode = function() {
 /* ─── 配置（持久化在插件自己的 storage 里）─────────────────────────────── */
 const STORAGE_KEY = 'phoneRemote.cfg'
 const DEFAULTS = {
-  ip: '192.168.1.34',
+  ip: '192.168.1.34' /* ← 改成你的局域网 IP */,
   port: '9119',
   user: 'dale',
   pass: '',

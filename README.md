@@ -115,9 +115,25 @@ hermes-phone-remote/
 
 ```bash
 node --check plugin.js                     # ESM 语法
-# 二维码：把 makeQr 段抽出来在 node 里跑 → 矩阵 → OpenCV 解码比对
+python scripts/build_plugin.py --install   # 模板 + 内联库 → plugin.js
+
+# 二维码自检：三个运行时任选，结果应完全一致（25x25, dark=332/625）
+node scripts/verify_qr.mjs
+bun  scripts/verify_qr.mjs
+deno run --allow-read scripts/verify_qr.mjs
+bun  scripts/verify_qr.mjs "http://192.168.1.34:9119/?v=x"   # 内容变长会自动升 version（29x29）
+
 # 加载证明：插件 register 里打一行 console.log，
 #           宿主会把 renderer console 转发到 <HERMES_HOME>/logs/desktop.log
+```
+
+**JS 运行时（三个都实测可用）**：`node 22.22.3` / `bun 1.4.2` / `deno 2.9.6`。
+项目只用到标准 ESM + `node:fs`，**零 npm 依赖**——bun / deno 是「想换就换」的备选，不是必需的。
+本机安装方式（国内走镜像，8 秒装完）：
+
+```bash
+npm i -g bun deno --registry=https://registry.npmmirror.com
+bun --version && deno --version
 ```
 
 ## 致谢 / Credits
