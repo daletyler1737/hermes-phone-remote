@@ -1,0 +1,19 @@
+# 凭据与本机私有产物 —— 永远不要入库
+.env
+*.env
+local.*.json
+phone-qr.png
+phone-qr.html
+hermes-phone/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
