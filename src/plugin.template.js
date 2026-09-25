@@ -528,6 +528,8 @@ function PhonePage({ ctx }) {
       setTun({ phase: 'ok', data: res })
       if (action === 'stop') {
         os.notify('公网链接已关闭', 'info')
+      } else if (action === 'extend') {
+        os.notify('已延长 2 小时', 'info')
       } else {
         os.notify('公网链接已开启：' + ((res && res.url) || ''), 'info')
       }
@@ -666,6 +668,12 @@ function PhonePage({ ctx }) {
                       jsx('span', { style: S.val, children: tunUrl }),
                       jsx(Button, { variant: 'outline', size: 'sm', onClick: copyTun, children: '复制' }),
                       jsx(Button, {
+                        variant: 'outline',
+                        size: 'sm',
+                        onClick: () => doTunnel('extend'),
+                        children: '延长 2 小时'
+                      }),
+                      jsx(Button, {
                         variant: 'ghost',
                         size: 'sm',
                         onClick: () => doTunnel('stop'),
@@ -698,6 +706,15 @@ function PhonePage({ ctx }) {
                       })
                     ]
                   }),
+              tunUrl && tun.expires_at
+                ? jsx('span', {
+                    style: S.sub,
+                    children:
+                      '到 ' +
+                      new Date(tun.expires_at * 1000).toTimeString().slice(0, 5) +
+                      ' 自动关闭 —— 忘了关是这类公网地址最大的风险，所以默认只开 2 小时，要接着用点「延长」。'
+                  })
+                : null,
               jsx('span', {
                 style: S.sub,
                 children:

@@ -30,6 +30,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -379,10 +380,24 @@ def restart(body: RestartBody) -> Dict[str, Any]:
 # 免费隧道的地每次重启都换（cloudflare 的固有属性，dsh 那边也一样）——
 # 所以面板上写清楚：手机收藏的那个地址会失效，重开一次扫新的即可。
 TUNNEL_WAIT_SECONDS = 60.0
+# 开一次公网链接自动活 2 小时 —— 忘了关是这类地址最大的风险，到点自己断，要续再点「延长」。
+# ponytail: 固定 2 小时，真要可调再挪进 TunnelBody。
+TUNNEL_TTL_SECONDS = 2 * 3600.0
 _TUNNEL_URL_RE = re.compile(r"https://(?!api\.)[a-z0-9-]+\.trycloudflare\.com")
 # cloudflared 会把控制面域名 api.trycloudflare.com 打在日志开头，先按这句提示定位再抓，
 # 否则会把控制面当成隧道地址发给手机（真踩过：面板显示 https://api.trycloudflare.com）。
-_TUNNEL: Dict[str, Any] = {"proc": None, "url": "", "port": 0}
+_TUNNEL: Dict[str, Any] = {"proc": None, "url": "", "port": 0, "expires_at": 0.0}
+_TUNNEL_TIMER: Optional[threading.Timer] = None
+
+
+def _arm_tunnel_timer(expires_at: float) -> None:
+    """到点自己关隧道。面板重启过也照旧：认领时按剩下的时间重挂一次。"""
+    global _TUNNEL_TIMER
+    if _TUNNEL_TIMER is not None:
+        _TUNNEL_TIMER.cancel()
+    _TUNNEL_TIMER = threading.Timer(max(1.0, float(expires_at) - time.time()), _stop_tunnel)
+    _TUNNEL_TIMER.daemon = True
+    _TUNNEL_TIMER.start()
 
 
 class TunnelBody(BaseModel):
@@ -455,19 +470,36 @@ def _tunnel_snapshot() -> Dict[str, Any]:
     """当前隧道状态。面板自己重启过（子进程还活着）时，靠小 json 认领它。"""
     proc = _TUNNEL.get("proc")
     if proc is not None and proc.poll() is None:
-        return {"running": True, "url": _TUNNEL["url"], "pid": proc.pid, "port": _TUNNEL["port"]}
+        return {"running": True, "url": _TUNNEL["url"], "pid": proc.pid, "port": _TUNNEL["port"],
+                "expires_at": _TUNNEL.get("expires_at", 0.0)}
     try:
         saved = json.loads(_tunnel_state_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {"running": False, "url": "", "pid": 0, "port": 0}
     pid = int(saved.get("pid") or 0)
     if _pid_alive(pid):
-        _TUNNEL.update(proc=None, url=str(saved.get("url") or ""), port=int(saved.get("port") or 0))
-        return {"running": True, "url": _TUNNEL["url"], "pid": pid, "port": _TUNNEL["port"]}
-    return {"running": False, "url": "", "pid": 0, "port": 0}
+        expires_at = float(saved.get("expires_at") or 0.0)
+        if expires_at and time.time() >= expires_at:
+            # 面板没在跑的那段时间就到点了：当场关掉，别让过期隧道悄悄留着。
+            # 这里不能调 _stop_tunnel（它会再读快照，绕回这个分支）；直接杀。
+            _TUNNEL.update(proc=None, url="", port=0, expires_at=0.0)
+            try:
+                _tunnel_state_path().unlink()
+            except OSError:
+                pass
+            _kill(pid)
+            return {"running": False, "url": "", "pid": 0, "port": 0, "expires_at": 0.0}
+        _TUNNEL.update(proc=None, url=str(saved.get("url") or ""), port=int(saved.get("port") or 0), expires_at=expires_at)
+        _arm_tunnel_timer(expires_at)
+        return {"running": True, "url": _TUNNEL["url"], "pid": pid, "port": _TUNNEL["port"], "expires_at": expires_at}
+    return {"running": False, "url": "", "pid": 0, "port": 0, "expires_at": 0.0}
 
 
 def _stop_tunnel() -> Dict[str, Any]:
+    global _TUNNEL_TIMER
+    if _TUNNEL_TIMER is not None:
+        _TUNNEL_TIMER.cancel()
+        _TUNNEL_TIMER = None
     snap = _tunnel_snapshot()
     proc = _TUNNEL.get("proc")
     if proc is not None and proc.poll() is None:
@@ -477,7 +509,7 @@ def _stop_tunnel() -> Dict[str, Any]:
             pass
     elif snap.get("pid"):
         _kill(int(snap["pid"]))
-    _TUNNEL.update(proc=None, url="", port=0)
+    _TUNNEL.update(proc=None, url="", port=0, expires_at=0.0)
     try:
         _tunnel_state_path().unlink()
     except OSError:
@@ -503,10 +535,22 @@ def tunnel(body: TunnelBody) -> Dict[str, Any]:
     """开/关公网隧道。开之前必须已经有面板密码 —— 公网地址是裸的。"""
     from hermes_cli.config import load_config
 
-    if (body.action or "start").strip().lower() == "stop":
+    action = (body.action or "start").strip().lower()
+    if action == "stop":
         return _stop_tunnel()
 
     snap = _tunnel_snapshot()
+    if action == "extend":
+        if not snap["running"]:
+            raise HTTPException(400, detail="隧道没在跑，直接开一个就行")
+        expires_at = time.time() + TUNNEL_TTL_SECONDS
+        _TUNNEL["expires_at"] = expires_at
+        _arm_tunnel_timer(expires_at)
+        _tunnel_state_path().write_text(
+            json.dumps({"pid": int(snap["pid"]), "url": snap["url"], "port": int(snap["port"]), "expires_at": expires_at}),
+            encoding="utf-8")
+        return {"ok": True, "running": True, **snap, "expires_at": expires_at}
+
     if snap["running"] and snap["url"]:
         return {"ok": True, "running": True, "already": True, **snap}
 
@@ -558,10 +602,14 @@ def tunnel(body: TunnelBody) -> Dict[str, Any]:
         raise HTTPException(502, detail=detail)
 
     _TUNNEL["url"] = url
-    _tunnel_state_path().write_text(json.dumps({"pid": proc.pid, "url": url, "port": port}), encoding="utf-8")
+    expires_at = time.time() + TUNNEL_TTL_SECONDS
+    _TUNNEL["expires_at"] = expires_at
+    _arm_tunnel_timer(expires_at)
+    _tunnel_state_path().write_text(
+        json.dumps({"pid": proc.pid, "url": url, "port": port, "expires_at": expires_at}), encoding="utf-8")
     return {
-        "ok": True, "running": True, "url": url, "pid": proc.pid, "port": port,
-        "note": "临时地址：cloudflared 一重启就换新的（cloudflare 免费隧道的固有属性）",
+        "ok": True, "running": True, "url": url, "pid": proc.pid, "port": port, "expires_at": expires_at,
+        "note": "临时地址：cloudflared 一重启就换新的；这一条到点自动关闭（cloudflare 免费隧道没有固定地址，也不会长期挂着）",
         "log": str(log),
     }
 
