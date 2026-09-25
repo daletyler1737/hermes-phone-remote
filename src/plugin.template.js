@@ -420,6 +420,7 @@ function PhonePage({ ctx }) {
   const [mode, setMode] = useState('lan')                 // lan = 同一 WiFi；net = 公网隧道
   const [tun, setTun] = useState({ phase: 'loading' })    // 公网隧道状态
   const [tunArm, setTunArm] = useState(false)              // 「开启公网链接」的两段式批准
+  const [ttlMin, setTtlMin] = useState(120)                // 开多久（分钟）
 
 
   const link = 'http://' + cfg.ip + ':' + cfg.port + '/'
@@ -519,12 +520,13 @@ function PhonePage({ ctx }) {
 
   const tunUrl = (tun.data && tun.data.url) || ''
   const tunBusy = tun.phase === 'busy'
+  const ttlOf = m => (m % 60 === 0 ? m / 60 + ' 小时' : m + ' 分钟')
 
   const doTunnel = async action => {
     if (tunBusy) return
     setTun({ ...tun, phase: 'busy', action })
     try {
-      const res = await rest('/tunnel', { method: 'POST', body: { action, port: Number(cfg.port) || 9119 } })
+      const res = await rest('/tunnel', { method: 'POST', body: { action, port: Number(cfg.port) || 9119, ttl_minutes: Number(ttlMin) || 0 } })
       setTun({ phase: 'ok', data: res })
       if (action === 'stop') {
         os.notify('公网链接已关闭', 'info')
@@ -671,7 +673,7 @@ function PhonePage({ ctx }) {
                         variant: 'outline',
                         size: 'sm',
                         onClick: () => doTunnel('extend'),
-                        children: '延长 2 小时'
+                        children: '延长 ' + ttlOf(ttlMin)
                       }),
                       jsx(Button, {
                         variant: 'ghost',
@@ -715,6 +717,24 @@ function PhonePage({ ctx }) {
                       ' 自动关闭 —— 忘了关是这类公网地址最大的风险，所以默认只开 2 小时，要接着用点「延长」。'
                   })
                 : null,
+              jsx('div', {
+                style: S.row,
+                children: [
+                  jsx('span', { style: S.sub, children: tunUrl ? '延长多久：' : '开多久：' }),
+                  jsx('select', {
+                    value: String(ttlMin),
+                    onChange: e => setTtlMin(Number(e.target.value)),
+                    style: {
+                      padding: '4px 6px', borderRadius: 6, border: '1px solid currentColor',
+                      background: 'transparent', color: 'inherit', fontSize: 12
+                    },
+                    children: [30, 120, 480].map(m =>
+                      jsx('option', { value: String(m), children: ttlOf(m) })
+                    )
+                  }),
+                  jsx('span', { style: S.sub, children: '到点自动断开（最长 8 小时，不给「永不」）' })
+                ]
+              }),
               jsx('span', {
                 style: S.sub,
                 children:

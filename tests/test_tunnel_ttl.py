@@ -52,4 +52,8 @@ A._pid_alive = lambda pid: False
 state(time.time() + 120)
 assert A._tunnel_snapshot()["running"] is False
 
+# 4) 开多久：不选/选 0 → 默认 2 小时；显式给分钟数照用
+assert A._ttl_seconds(0) == A.TUNNEL_TTL_SECONDS
+assert A._ttl_seconds(30) == 1800.0
+
 print("OK tunnel ttl")

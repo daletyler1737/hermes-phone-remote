@@ -383,6 +383,11 @@ TUNNEL_WAIT_SECONDS = 60.0
 # 开一次公网链接自动活 2 小时 —— 忘了关是这类地址最大的风险，到点自己断，要续再点「延长」。
 # ponytail: 固定 2 小时，真要可调再挪进 TunnelBody。
 TUNNEL_TTL_SECONDS = 2 * 3600.0
+
+
+def _ttl_seconds(minutes: int) -> float:
+    """面板选的开多久（分钟）；没选就用默认 2 小时。不给「永不」，地址不该长期挂着。"""
+    return float(minutes) * 60.0 if minutes and minutes > 0 else TUNNEL_TTL_SECONDS
 _TUNNEL_URL_RE = re.compile(r"https://(?!api\.)[a-z0-9-]+\.trycloudflare\.com")
 # cloudflared 会把控制面域名 api.trycloudflare.com 打在日志开头，先按这句提示定位再抓，
 # 否则会把控制面当成隧道地址发给手机（真踩过：面板显示 https://api.trycloudflare.com）。
@@ -401,7 +406,8 @@ def _arm_tunnel_timer(expires_at: float) -> None:
 
 
 class TunnelBody(BaseModel):
-    action: str = "start"          # start | stop
+    action: str = "start"          # start | stop | extend
+    ttl_minutes: int = 0           # 0 = 用默认 2 小时
     port: Optional[int] = None
 
 
@@ -543,7 +549,7 @@ def tunnel(body: TunnelBody) -> Dict[str, Any]:
     if action == "extend":
         if not snap["running"]:
             raise HTTPException(400, detail="隧道没在跑，直接开一个就行")
-        expires_at = time.time() + TUNNEL_TTL_SECONDS
+        expires_at = time.time() + _ttl_seconds(body.ttl_minutes)
         _TUNNEL["expires_at"] = expires_at
         _arm_tunnel_timer(expires_at)
         _tunnel_state_path().write_text(
@@ -602,7 +608,7 @@ def tunnel(body: TunnelBody) -> Dict[str, Any]:
         raise HTTPException(502, detail=detail)
 
     _TUNNEL["url"] = url
-    expires_at = time.time() + TUNNEL_TTL_SECONDS
+    expires_at = time.time() + _ttl_seconds(body.ttl_minutes)
     _TUNNEL["expires_at"] = expires_at
     _arm_tunnel_timer(expires_at)
     _tunnel_state_path().write_text(
