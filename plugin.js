@@ -2989,7 +2989,9 @@ function PhonePage({ ctx }) {
       jsxs('div', {
         style: S.card,
         children: [
-          jsx(QrImage, { text: mode === 'net' ? tunUrl || link : link, size: 224 }),
+          mode === 'net' && !tunUrl
+            ? jsx('span', { style: S.sub, children: '先点上面的「开启公网链接」，这里会变成公网地址的二维码' })
+            : jsx(QrImage, { text: mode === 'net' ? tunUrl : link, size: 224 }),
           jsxs('div', {
             style: S.col,
             children: [
