@@ -42,7 +42,7 @@ for (const v of variants) {
     storage: { get: () => null, set: () => {}, remove: () => {} },
     rest: (p) =>
       p === '/status'
-        ? Promise.resolve({ username: 'dale', hash_set: true, port: 9119, running: true, lan_ip: '192.168.1.10', url: 'http://192.168.1.10:9119/' })
+        ? Promise.resolve({ username: 'demo', hash_set: true, port: 9119, running: true, lan_ip: '192.168.1.10', url: 'http://192.168.1.10:9119/' })
         : p === '/tunnel'
           ? Promise.resolve({ ok: true, running: true, url: 'https://demo.trycloudflare.com', expires_at: Math.floor(Date.now() / 1000) + 7200 })
           : p === '/pair'

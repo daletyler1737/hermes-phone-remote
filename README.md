@@ -1,145 +1,143 @@
-# 连接手机 · Phone Remote
+# Phone Remote — Hermes desktop plugin
 
-> Hermes 官方桌面版插件 ｜ English: [README.en.md](README.en.md)
+> English · [中文说明](README.zh-CN.md)
 
-在 Hermes 桌面版里加一个「连接手机」入口：**出二维码 → 手机扫码 → 在手机上继续和 Hermes 对话**。
-对标同类付费的「扫码配对 + 手机远程聊天」功能，**零额外服务、零自研后端** —— 直接复用 Hermes 自带的 dashboard。
+Adds a **Connect phone** entry to the Hermes desktop app: show a QR code, scan it with your
+phone, and keep chatting with Hermes from the phone. A free, self-hosted stand-in for paid
+"scan-to-pair + remote chat" features — **no extra service, no bespoke backend**; it reuses
+the dashboard that already ships with Hermes.
 
----
+Two modes:
 
-## 状态 / Status
-
-**半成品 v0.1.0**（2026-09-24）。插件代码已完成，通过以下静态验证，但**尚未经过真人手机端到端使用**：
-
-- ✅ ESM 语法检查（`node --check`）
-- ✅ 二维码真扫验证：从成品文件里抽出编码段运行，用 OpenCV `QRCodeDetector` 解出正确 URL
-- ✅ 与宿主契约逐项对齐（对照官方自带插件 `wallpaper/plugin.js` 的写法）
-- ✅ 服务侧实测：`/api/status` 200、`/` 302、走局域网 IP 也返回 302（0.0.0.0 绑定生效）、防火墙规则 Allow
-
-**未验证**：手机浏览器实际扫码登录 + 长时间对话体验；官方 dashboard 在手机竖屏下的排版未做适配层。
-
-## 它做什么 / 不做什么
-
-| | |
-|---|---|
-| **做** | Ctrl+K 搜「连接手机」→ 整页二维码 + 地址 + 账号信息 → 手机扫码打开 Hermes Web UI → 在手机上继续对话、切换会话 |
-| **不做** | 不做独立手机 App；不自研 Web 聊天后端；不触碰会话数据库（全部走官方 dashboard 链路） |
-
-## 原理 / How it works
-
-| 层 | 用什么 | 说明 |
+| Mode | How the phone reaches the PC | Password needed |
 |---|---|---|
-| 手机页面 | Hermes 自带 dashboard | `hermes dashboard --host 0.0.0.0 --port 9119` |
-| 对话通道 | dashboard 的 `/api/pty` WebSocket | Windows 下走 ConPTY，手机上的输入直接进入终端会话 |
-| 鉴权 | dashboard `basic_auth` | gated 模式下一次 ticket 换 WS 连接，不用长期 token |
-| 二维码 | 内联 `qrcode-generator` (MIT) | 桌面插件不能 import 外部 npm 包，故把库源码内联进 `plugin.js` |
-| 入口注册 | 插件 SDK 三个区域 | `PALETTE_AREA`（Ctrl+K）、`ROUTES_AREA`（整页）、`SIDEBAR_NAV_AREA`（侧栏） |
+| **LAN** | `http://<your-LAN-IP>:9119/`, same Wi-Fi | yes, log in once (session cookie persists) |
+| **Internet** | Cloudflare quick tunnel, shows a public `https://…trycloudflare.com` address | **no** — scan-to-pair (one-shot token) |
 
-扫码即登录**做不到**：Hermes dashboard 没有 magic-link / invite token 端点（`login_page.py` 明确不注入 token），所以手机上**首次要手动登录一次**，之后靠会话 Cookie 记住。
+## Status
 
-## 安装 / Install
+**v0.2.0** (2026-09). Working, verified end-to-end: LAN login, scan-to-pair over a real
+Cloudflare tunnel, byte-identical assets through the tunnel, and panel self-restart.
+The stock dashboard's mobile portrait layout is not adapted (use landscape or "desktop site").
 
-```bash
-# 1) 构建并安装到 Hermes 桌面插件目录
-python scripts/build_plugin.py --install
+## How it works
 
-# 2) 启动手机可访问的 dashboard
-scripts\start_dashboard.bat
+- Phone page = the stock dashboard: `hermes dashboard --host 0.0.0.0 --port 9119`
+- Chat transport = dashboard `/api/pty` WebSocket (ConPTY on Windows)
+- Auth = dashboard `basic_auth` (cookie/token sessions — **not** HTTP Basic)
+- **Internet mode** = Cloudflare quick tunnel (`cloudflared`, reused from DSH desktop if present)
+  pointing at a small local reverse proxy (`tools/pair_proxy.py`, `127.0.0.1:9121`).
+  The proxy serves `/pair?t=<token>` outside the dashboard's auth gate — which is the only way
+  to implement scan-to-pair, since the auth plugin's public whitelist is just `/login`, `/auth/*`
+  and static assets.
+- Pairing state (`pending → approved → claimed`) lives in a per-user state file; claiming mints
+  the same session cookie the dashboard would, so the phone lands **inside** the panel.
+- QR = [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator) (MIT) inlined — desktop
+  plugins may only import `@hermes/plugin-sdk`, `react`, `react/jsx-runtime`.
 
-# 3) 放行防火墙（管理员 PowerShell，只需一次）
-New-NetFirewallRule -DisplayName "Hermes Phone Chat 9119" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 9119
+### Internet-mode safety rails
 
-# 4) 桌面版里加载插件
-#    Ctrl+K → 搜 "Reload desktop plugins" → 回车
-#    Ctrl+K → 搜 "连接手机" → 回车
-```
+1. Address is random and unguessable.
+2. Refuses to open a public link unless a dashboard password is set.
+3. Two-step confirm (button flips to "confirm — reachable from the internet", auto-cancels after 8s).
+4. **The tunnel dies on its own after 2 hours** (extendable), and there is a one-click stop.
 
-## 使用 / Usage
-
-打开「连接手机」页后：
-
-1. 手机相机 / 微信扫左侧二维码（手机要和电脑在**同一个 Wi-Fi**）
-2. 首次打开会看到登录页 —— 输入下面显示的账号和密码，勾选「记住」
-3. 之后手机上就能接着对话了
-
-密码不写在插件里。查看当前 dashboard 凭据：
+## Install
 
 ```bash
-hermes config get dashboard.basic_auth        # 显示用户名与密码
+python scripts/build_plugin.py --install     # build + copy into the desktop plugins dir
+scripts\start_dashboard.bat                  # start a LAN-reachable dashboard
+# once, as admin:
+# New-NetFirewallRule -DisplayName "Hermes Phone Chat 9119" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 9119
+# then in the app: Ctrl+K -> "Reload desktop plugins" -> Ctrl+K -> "Connect phone"
 ```
 
-页面「设置」区可把密码粘贴一次，插件只存到**本机** `ctx.storage`，方便以后直接点「复制」。
+Credentials are never stored in this repo. Read the current ones with:
 
-## 参数速查 / Settings
+```bash
+hermes config get dashboard.basic_auth
+```
 
-| 项 | 默认值 | 说明 |
-|---|---|---|
-| 局域网 IP | `192.168.1.10` | 插件设置区可改；命令行 `ipconfig` 查；换网络后要更新 |
-| 端口 | `9119` | 与 dashboard 启动参数一致 |
-| 用户名 | `admin` | 即 `dashboard.basic_auth.username` |
-| 密码 | 空 | 不预置；粘贴一次后由插件本地保存 |
-| 启动脚本目录 | `05_工具脚本\hermes-phone` | 页面「打开启动脚本文件夹」按钮指向它，可按需改 |
+## Auth notes (these bite)
 
-## 故障排查 / Troubleshooting
+- The dashboard authenticates with **cookies/tokens, not HTTP Basic** — `curl -u` always 401s.
+  The real endpoint is `POST /auth/password-login`
+  (`{provider, username, password, next}` → `200 + Set-Cookie`).
+- **`password_hash` takes precedence over the plaintext `password`** in `dashboard.basic_auth`.
+  Changing only the plaintext leaves you with a 401. Set both:
+  `hermes config set dashboard.basic_auth.password <new>` **and**
+  `hermes config set dashboard.basic_auth.password_hash <scrypt$…>` (hash it with
+  `plugins.dashboard_auth.basic.hash_password`), then restart the panel.
+- Never hardcode a password into a script — passwords rotate.
 
-| 现象 | 原因与处理 |
+## Host contracts worth remembering
+
+- `render` belongs at the **top level** of `ctx.register({...})`, not inside `data`.
+- Notifications use the object form: `host.notify({ kind, message })`.
+- Sidebar nav items take `data: { path, label, codicon }`.
+- Only the SDK, react and react/jsx-runtime may be imported; everything else gets inlined.
+- Saving a plugin file does not reliably hot-reload a **newly added** folder — use
+  `Reload desktop plugins` from the command palette.
+- The QR SVG must stay black-on-white (never theme-tinted) or phones fail to scan.
+
+## Troubleshooting
+
+| Symptom | Cause / fix |
 |---|---|
-| Ctrl+K 搜不到「连接手机」 | 插件没被扫描 → Ctrl+K 搜 **"Reload desktop plugins"**；仍没有就重载窗口（Ctrl+R）或重启桌面版 |
-| 手机打不开地址 | ① 服务在跑吗：`curl http://127.0.0.1:9119/api/status` 应为 200；② 防火墙是否放行 9119；③ 手机与电脑是否同一 Wi-Fi；④ 电脑 IP 是否变了（设置区更新） |
-| 扫码后登录失败 | 用户名/密码不对 → `hermes config get dashboard.basic_auth` 核对 |
-| 手机页面排版挤 | 官方 dashboard 是桌面版 Web UI，竖屏未适配；可用横屏或浏览器「桌面版网站」 |
-| 电脑重启后失效 | dashboard 不会自启 → 双击 `scripts\start_dashboard.bat`（或做成开机任务） |
+| Ctrl+K can't find "Connect phone" | plugin not scanned → run `Reload desktop plugins`; still missing → reload the window or restart the app |
+| Phone can't open the address | dashboard running? (`curl http://127.0.0.1:9119/api/status` → 200) · firewall allows 9119? · same Wi-Fi? · LAN IP changed? |
+| Login fails (401) | see *Auth notes* — `password_hash` is probably stale; note the dashboard has **no** Basic auth popup |
+| Public link opens but the page is blank | reverse proxy must forward **blocking** (`recv`+`sendall`); the old non-blocking pump silently dropped backpressured writes (`unexpected EOF` in the cloudflared log) |
+| Tunnel keeps dropping / Error 1033 | force IPv4 at the edge: `--edge-ip-version 4` (IPv6 edges time out behind fake-IP proxies) |
+| "Restart panel" does nothing | the panel must not kill its own PID; use the detached respawn helper (`tools/dashboard_respawn.py`), which kills the old process only after the response is sent |
+| Cramped layout on the phone | the stock dashboard is a desktop web UI; use landscape or "desktop site" |
+| Dead after a reboot | the dashboard does not autostart → run `scripts\start_dashboard.bat` (or add a startup task) |
 
-## 开发 / Development
+## Repo layout
 
 ```
-hermes-phone-remote/
-├─ src/plugin.template.js     # 可维护源码（QR 库处留 /*__QR_INLINE__*/ 占位符）
-├─ vendor/qrcode-generator.js # MIT 许可的二维码库，构建时内联
-├─ scripts/build_plugin.py    # 模板 + vendor → plugin.js（--install 同步到插件目录）
-├─ scripts/start_dashboard.bat
-└─ plugin.js                  # 构建产物（= Hermes 实际加载的文件）
+src/plugin.template.js       maintainable source (QR library kept as /*__QR_INLINE__*/ placeholder)
+vendor/qrcode-generator.js   MIT QR library, inlined at build time
+scripts/build_plugin.py      template + vendor -> plugin.js  (--install copies into the plugins dir)
+scripts/start_dashboard.bat  start a LAN-reachable dashboard
+dashboard/plugin_api.py      backend mounted on the dashboard process
+tools/pair_proxy.py          reverse proxy for scan-to-pair (Internet mode)
+tools/dashboard_respawn.py   detached helper for restarting the panel from inside itself
+tests/                       stdlib-only checks (tunnel TTL, pid-alive, password policy)
+plugin.js                    build output (= what Hermes loads)
 ```
 
-### 宿主契约（踩过的坑，已对齐）
+## JS runtimes
 
-- **`render` 放在 `ctx.register({...})` 顶层**，不是塞在 `data` 里 —— 放错位置页面静默不显示。
-- **通知用对象形式**：`host.notify({ kind: 'info', message: '...' })`；位置参数形式在部分版本不生效。
-- 区域常量从 SDK 导入：`import { PALETTE_AREA, ROUTES_AREA, SIDEBAR_NAV_AREA } from '@hermes/plugin-sdk'`；侧栏条目的 `data` 是 `{ path, label, codicon }`。
-- 插件**只能** `import` `@hermes/plugin-sdk` / `react` / `react/jsx-runtime`，其他 npm 包必须内联。
-- **保存文件不保证热重载**：官方 `runtime-loader` 对「已存在插件」的文件改动有 fs-watch，但新建目录要走轮询 —— 可靠做法是手动 `Reload desktop plugins`。
-- 二维码 SVG 是功能元素，**必须**保持白底黑码（不能用主题变量），否则手机扫不出。
-
-### 验证手段（本项目实际用过）
+Build and verify scripts use only standard ESM plus `node:fs` — **no npm dependencies**,
+so any of the three runtimes runs them unchanged:
 
 ```bash
-node --check plugin.js                     # ESM 语法
-python scripts/build_plugin.py --install   # 模板 + 内联库 → plugin.js
-
-# 二维码自检：三个运行时任选，结果应完全一致（25x25, dark=332/625）
 node scripts/verify_qr.mjs
 bun  scripts/verify_qr.mjs
 deno run --allow-read scripts/verify_qr.mjs
-bun  scripts/verify_qr.mjs "http://192.168.1.10:9119/?v=x"   # 内容变长会自动升 version（29x29）
-
-# 加载证明：插件 register 里打一行 console.log，
-#           宿主会把 renderer console 转发到 <HERMES_HOME>/logs/desktop.log
 ```
 
-**JS 运行时（三个都实测可用）**：`node 22.22.3` / `bun 1.4.2` / `deno 2.9.6`。
-项目只用到标准 ESM + `node:fs`，**零 npm 依赖**——bun / deno 是「想换就换」的备选，不是必需的。
-本机安装方式（国内走镜像，8 秒装完）：
+## Development checks
 
 ```bash
-npm i -g bun deno --registry=https://registry.npmmirror.com
-bun --version && deno --version
+node --check plugin.js                    # ESM syntax
+python scripts/build_plugin.py --install  # build
+bash tools/render-test/run.sh             # render regression (real react-dom render + assertions)
+python tests/test_tunnel_ttl.py           # tunnel lifetime / claim logic, no real processes
+python tests/test_pid_alive.py            # Windows-safe pid liveness
 ```
 
-## 致谢 / Credits
+Backend changes only take effect after the panel restarts (it runs the code it imported at
+startup) — use the plugin's own "Restart panel" button.
 
-- 二维码库：[qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator) © Kazuhiko Arase，MIT，见 `vendor/`。
-- 思路参考：DeepSeek Harness 的 `dsh-remote-web-ui` 插件（其做法是删掉自研移动端页面，二维码直指官方 Web GUI —— 本项目沿用同一路线）。
+## Credits
 
-## 许可 / License
+- QR library: [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator) © Kazuhiko Arase, MIT, see `vendor/`.
+- Approach inspired by DSH's `dsh-remote-web-ui` (point the QR at the official web GUI instead of
+  writing a mobile page of your own).
 
-MIT。**注意：本仓库不含任何凭据**；`.env`、二维码图片（含本机内网地址）等一律在 `.gitignore` 里。
+## License
+
+MIT. This repo contains **no credentials**; `.env` files and QR images (which embed your LAN
+address) are gitignored.
