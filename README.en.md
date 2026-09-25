@@ -4,7 +4,7 @@
 
 Adds a **Connect phone** entry to the Hermes desktop app: show a QR code, scan it with your phone,
 and keep chatting with Hermes from the phone. A free, self-hosted stand-in for paid
-"scan-to-pair + remote chat" features such as ekko — **no extra service, no bespoke backend**;
+"scan-to-pair + remote chat" features — **no extra service, no bespoke backend**;
 it simply reuses the dashboard that ships with Hermes.
 
 ## Status

@@ -1,7 +1,7 @@
 /**
  * 连接手机 / Phone Remote — 扫码在手机上继续对话
  * ---------------------------------------------------------------------------
- * 目的：把「手机远程聊天」做成桌面版内置入口（替代 ekko 的扫码配对收费功能）。
+ * 目的：把「手机远程聊天」做成桌面版内置入口 —— 手机浏览器扫码即可继续对话。
  * 底层零自研：直接复用 Hermes 自带 dashboard（手机浏览器打开 http://<LAN-IP>:9119/），
  * 本插件只负责：① 出二维码 ② 给地址/账号/密码 ③ 一键打开本机面板 ④ 探测 IP 与服务状态。
  *
@@ -2342,11 +2342,11 @@ var qrcode = function() {
 /* ─── 配置（持久化在插件自己的 storage 里）─────────────────────────────── */
 const STORAGE_KEY = 'phoneRemote.cfg'
 const DEFAULTS = {
-  ip: '192.168.1.34' /* ← 改成你的局域网 IP */,
+  ip: '' /* 留空 = 自动探测局域网 IP；也可手填，如 192.168.1.10 */,
   port: '9119',
-  user: 'dale',
+  user: '',
   pass: '',
-  scriptDir: 'E:\\zip\\agent file big\\05_工具脚本\\hermes-phone'
+  scriptDir: ''
 }
 
 const $cfg = atom({ ...DEFAULTS })
@@ -2850,7 +2850,7 @@ function PhonePage({ ctx }) {
                           jsx(Input, {
                             size: 'sm',
                             value: d.user,
-                            placeholder: 'dale',
+                            placeholder: 'admin',
                             onChange: e => edit({ user: e.target.value })
                           })
                         ]

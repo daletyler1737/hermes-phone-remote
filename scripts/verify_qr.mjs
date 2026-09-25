@@ -18,7 +18,11 @@ const seg = src.slice(a, b + tail.length)
 // ponytail: 直接执行构建产物里的那一段，比为了验证再搭一套打包链便宜得多
 const makeQr = new Function(seg + '\nreturn makeQr')()
 
-const url = process.argv[2] || 'http://192.168.1.34:9119/'
+const url = process.argv[2]
+if (!url) {
+  console.error('用法: node scripts/verify_qr.mjs <url>  例: http://192.168.1.10:9119/')
+  process.exit(2)
+}
 // 这段导出的是二维码库构造函数本身：qrcode(typeNumber, errorCorrectionLevel)
 const qr = makeQr(0, 'M')
 qr.addData(url)

@@ -3,7 +3,7 @@
 > Hermes 官方桌面版插件 ｜ English: [README.en.md](README.en.md)
 
 在 Hermes 桌面版里加一个「连接手机」入口：**出二维码 → 手机扫码 → 在手机上继续和 Hermes 对话**。
-对标 ekko 等付费的「扫码配对 + 手机远程聊天」功能，**零额外服务、零自研后端** —— 直接复用 Hermes 自带的 dashboard。
+对标同类付费的「扫码配对 + 手机远程聊天」功能，**零额外服务、零自研后端** —— 直接复用 Hermes 自带的 dashboard。
 
 ---
 
@@ -42,7 +42,6 @@
 ```bash
 # 1) 构建并安装到 Hermes 桌面插件目录
 python scripts/build_plugin.py --install
-#    （可带 --ip 192.168.1.50 --port 9119 --user dale 覆盖默认值）
 
 # 2) 启动手机可访问的 dashboard
 scripts\start_dashboard.bat
@@ -75,9 +74,9 @@ hermes config get dashboard.basic_auth        # 显示用户名与密码
 
 | 项 | 默认值 | 说明 |
 |---|---|---|
-| 局域网 IP | `192.168.1.34` | 插件设置区可改；命令行 `ipconfig` 查；换网络后要更新 |
+| 局域网 IP | `192.168.1.10` | 插件设置区可改；命令行 `ipconfig` 查；换网络后要更新 |
 | 端口 | `9119` | 与 dashboard 启动参数一致 |
-| 用户名 | `dale` | 即 `dashboard.basic_auth.username` |
+| 用户名 | `admin` | 即 `dashboard.basic_auth.username` |
 | 密码 | 空 | 不预置；粘贴一次后由插件本地保存 |
 | 启动脚本目录 | `05_工具脚本\hermes-phone` | 页面「打开启动脚本文件夹」按钮指向它，可按需改 |
 
@@ -121,7 +120,7 @@ python scripts/build_plugin.py --install   # 模板 + 内联库 → plugin.js
 node scripts/verify_qr.mjs
 bun  scripts/verify_qr.mjs
 deno run --allow-read scripts/verify_qr.mjs
-bun  scripts/verify_qr.mjs "http://192.168.1.34:9119/?v=x"   # 内容变长会自动升 version（29x29）
+bun  scripts/verify_qr.mjs "http://192.168.1.10:9119/?v=x"   # 内容变长会自动升 version（29x29）
 
 # 加载证明：插件 register 里打一行 console.log，
 #           宿主会把 renderer console 转发到 <HERMES_HOME>/logs/desktop.log
