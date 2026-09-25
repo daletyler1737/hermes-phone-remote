@@ -2716,6 +2716,7 @@ function PhonePage({ ctx }) {
   const [log, setLog] = useState(null)
   const [mode, setMode] = useState('lan')                 // lan = 同一 WiFi；net = 公网隧道
   const [tun, setTun] = useState({ phase: 'loading' })    // 公网隧道状态
+  const [tunArm, setTunArm] = useState(false)              // 「开启公网链接」的两段式批准
 
 
   const link = 'http://' + cfg.ip + ':' + cfg.port + '/'
@@ -2973,18 +2974,31 @@ function PhonePage({ ctx }) {
                     style: S.row,
                     children: [
                       jsx(Button, {
-                        variant: 'secondary',
+                        variant: tunArm ? 'default' : 'secondary',
                         size: 'sm',
-                        onClick: () => doTunnel('start'),
-                        children: tunBusy ? '创建中…' : '开启公网链接'
+                        onClick: () => {
+                          if (!tunArm) {              // 两段式批准：先点一下，再点才真的开公网（防误触）
+                            setTunArm(true)
+                            setTimeout(() => setTunArm(false), 8000)   // 走开了就自动撤销，免得下次点一下就把公网开了
+                            return
+                          }
+                          setTunArm(false)
+                          doTunnel('start')
+                        },
+                        children: tunBusy ? '创建中…' : tunArm ? '确认开启（外网可访问）' : '开启公网链接'
                       }),
-                      jsx('span', { style: S.sub, children: '不开的时候，外网完全访问不到这台机器' })
+                      jsx('span', {
+                        style: S.sub,
+                        children: tunArm
+                          ? '确认后 Cloudflare 会分配一个公网地址 —— 谁拿到这个地址都能打开登录页'
+                          : '不开的时候，外网完全访问不到这台机器'
+                      })
                     ]
                   }),
               jsx('span', {
                 style: S.sub,
                 children:
-                  '地址是临时的：面板一重启就换新的（Cloudflare 免费隧道就是这样），重开一次扫新码即可。登录用的还是上面那组账号密码。'
+                  '地址是临时的：重启了 cloudflared（电脑重启、手动关掉）就会换新的，重开一次扫新码即可；只重启面板不影响它。登录用的还是上面这组账号密码。'
               }),
               tun.phase === 'error' ? jsx('div', { style: S.warnMsg, children: tun.error }) : null,
               tun.phase === 'error'
