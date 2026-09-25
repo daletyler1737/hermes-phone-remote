@@ -2424,35 +2424,48 @@ function go(path) {
 /* ─── 局域网 IP 自动探测 ─────────────────────────────────────────────────
    插件沙箱不给网络枚举 API，但 WebRTC 的 ICE 候选里带着本机内网地址；
    不依赖任何外部服务。拿不到就返回 null（用户仍可手填）。 */
+/* 候选打分：真局域网网卡 > 虚拟网卡。
+   192.168.x 最像家用/办公网（VirtualBox 占着 56/57 段，压低）；
+   10.x 常见于办公网；172.16-31 是 Docker/Hyper-V/WSL 虚拟网卡的高发段。 */
+function ipScore(ip) {
+  if (!ip) return 0
+  if (ip.indexOf('127.') === 0 || ip.indexOf('169.254.') === 0) return 0
+  if (/^192\.168\./.test(ip)) return /^192\.168\.(56|57)\./.test(ip) ? 1 : 3
+  if (/^10\./.test(ip)) return 2
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(ip)) return 1
+  return 1
+}
+
 function detectLanIp() {
   return new Promise(resolve => {
     let done = false
+    let best = null
     const finish = value => {
       if (done) return
       done = true
       resolve(value)
     }
-    const timer = setTimeout(() => finish(null), 2500)
+    // 超时兜底：交出目前最优的候选（可能仍是 null，用户还能手填）
+    const timer = setTimeout(() => finish(best), 2500)
     try {
       const pc = new RTCPeerConnection({ iceServers: [] })
       pc.createDataChannel('probe')
+      // ICE 候选会把所有网卡都报一遍，Hyper-V / WSL / VMware 的虚拟网卡（典型 172.26.x）
+      // 经常排在真实网卡前面 —— 所以不能拿到第一个就用，要收完再挑分最高的。
       pc.onicecandidate = e => {
         const cand = e && e.candidate && e.candidate.candidate
         if (!cand) {
-          // 候选收集结束还没拿到内网地址（或被 mDNS 混淆）→ 放弃
-          clearTimeout(timer)
-          return finish(null)
-        }
-        const m = /([0-9]{1,3}([.][0-9]{1,3}){3})/.exec(cand)
-        if (m && m[1].indexOf('127.') !== 0 && m[1].indexOf('169.254.') !== 0) {
+          // 候选收集结束：交出当前最优解
           clearTimeout(timer)
           try {
             pc.close()
           } catch {
             /* 无所谓 */
           }
-          finish(m[1])
+          return finish(best)
         }
+        const m = /([0-9]{1,3}([.][0-9]{1,3}){3})/.exec(cand)
+        if (m && ipScore(m[1]) > ipScore(best)) best = m[1]
       }
       pc.createOffer()
         .then(o => pc.setLocalDescription(o))
@@ -2659,15 +2672,7 @@ function PhonePage({ ctx }) {
   return jsxs('div', {
     style: S.root,
     children: [
-      jsxs('div', {
-        children: [
-          jsx('div', { style: S.title, children: '连接手机 · 扫码继续对话' }),
-          jsx('div', {
-            style: S.sub,
-            children: '手机和电脑连同一个 Wi-Fi 就行：不用装 App、不用数据线，也不花 ekko 那笔钱。'
-          })
-        ]
-      }),
+      jsx('div', { style: S.title, children: '连接手机 · 扫码继续对话' }),
 
       jsxs('div', {
         style: S.statusBar,
