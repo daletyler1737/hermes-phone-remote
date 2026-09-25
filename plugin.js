@@ -2815,6 +2815,7 @@ function PhonePage({ ctx }) {
     }
   }
 
+  const svcUp = !!(svc.data && svc.data.running) || status.phase === 'online'
   const tunUrl = (tun.data && tun.data.url) || ''
   const tunBusy = tun.phase === 'busy'
   const ttlOf = m => (m % 60 === 0 ? m / 60 + ' 小时' : m + ' 分钟')
@@ -2886,6 +2887,14 @@ function PhonePage({ ctx }) {
             }
           }),
           jsx('span', { children: statusText }),
+          svcUp
+            ? null
+            : jsx(Button, {
+                variant: 'outline',
+                size: 'sm',
+                onClick: doRestart,
+                children: pwBusy === 'restart' ? '启动中…' : '启动服务'
+              }),
           jsx(Button, { variant: 'text', size: 'inline', onClick: recheck, children: '重新检测' })
         ]
       }),
@@ -3200,7 +3209,7 @@ function PhonePage({ ctx }) {
                 variant: 'outline',
                 size: 'sm',
                 onClick: doRestart,
-                children: pwBusy === 'restart' ? '重启中…' : '重启面板'
+                children: pwBusy === 'restart' ? (svcUp ? '重启中…' : '启动中…') : svcUp ? '重启面板' : '启动服务'
               }),
               jsx(Button, {
                 variant: 'text',
@@ -3226,7 +3235,7 @@ function PhonePage({ ctx }) {
           jsxs('span', {
             children: [
               jsx('b', { children: '状态是「未检测到」？' }),
-              ' 说明后台服务没在跑 —— 点上面「重启面板」拉起来（等价于双击 ',
+              ' 说明后台服务没在跑 —— 点上面「启动服务」拉起来（等价于双击 ',
               jsx('code', { children: '启动手机网页-Start-Phone-Web.bat' }),
               '，服务监听 0.0.0.0:',
               cfg.port,
