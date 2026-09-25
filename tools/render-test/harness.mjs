@@ -22,6 +22,10 @@ const ctx = {
         lan_ip: '192.168.1.10',
         url: 'http://192.168.1.10:9119/'
       })
+    if (path === '/tunnel')
+      return Promise.resolve({
+        ok: true, running: true, url: 'https://demo-example-abc.trycloudflare.com', pid: 1234, port: 9119
+      })
     if (path === '/login-log')
       return Promise.resolve({ path: 'logs/dashboard-auth.log', entries: [{ ok: true, ip: '192.168.1.85', line: 'login_success ip=192.168.1.85' }] })
     return Promise.resolve({ ok: true })

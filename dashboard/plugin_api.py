@@ -21,7 +21,9 @@
 """
 from __future__ import annotations
 
+import json
 import os
+import re
 import secrets
 import shutil
 import signal
@@ -173,8 +175,12 @@ def _start_dashboard(port: int, host: str) -> int:
     """后台拉一个 dashboard（不弹窗、关掉终端也活着）。返回 PID。"""
     flags = 0
     if os.name == "nt":
-        flags = int(getattr(subprocess, "DETACHED_PROCESS", 0)) | int(
-            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        # DETACHED_PROCESS=脱离控制台（关掉桌面版也活着）；CREATE_NO_WINDOW=连
+        # 那一闪而过的黑窗口都不要（实机反馈：点「重启面板」不该弹终端）。
+        flags = (
+            int(getattr(subprocess, "DETACHED_PROCESS", 0))
+            | int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+            | int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
         )
     log = _log_path()
     with open(log, "ab") as fh:
@@ -341,3 +347,188 @@ def restart(body: RestartBody) -> Dict[str, Any]:
         except OSError:
             pass
     return result
+
+
+# ─── 互联网模式：Cloudflare 快速隧道（公网访问）─────────────────────────────
+# 做法与 dsh-web 的 dsh-remote-web-ui 同源：起一个 cloudflared quick tunnel，
+# 从它的输出里抓 https://xxx.trycloudflare.com，面板拿这个地址出二维码。
+# 免费隧道的地每次重启都换（cloudflare 的固有属性，dsh 那边也一样）——
+# 所以面板上写清楚：手机收藏的那个地址会失效，重开一次扫新的即可。
+TUNNEL_WAIT_SECONDS = 60.0
+_TUNNEL_URL_RE = re.compile(r"https://(?!api\.)[a-z0-9-]+\.trycloudflare\.com")
+# cloudflared 会把控制面域名 api.trycloudflare.com 打在日志开头，先按这句提示定位再抓，
+# 否则会把控制面当成隧道地址发给手机（真踩过：面板显示 https://api.trycloudflare.com）。
+_TUNNEL: Dict[str, Any] = {"proc": None, "url": "", "port": 0}
+
+
+class TunnelBody(BaseModel):
+    action: str = "start"          # start | stop
+    port: Optional[int] = None
+
+
+def _cloudflared_exe() -> str:
+    """找现成的 cloudflared；找不到就直说丢一个 exe 进来（不自动下 30MB）。"""
+    exe = "cloudflared.exe" if os.name == "nt" else "cloudflared"
+    cands = [
+        Path(__file__).with_name(exe),                                              # 插件自带
+        Path.home() / ".cloudflared" / exe,
+        Path(os.environ.get("APPDATA", "") or ".") / "dsh-desktop" / "bin" / exe,   # DSH Desktop 自带的那份
+    ]
+    found = shutil.which("cloudflared")
+    if found:
+        cands.append(Path(found))
+    for c in cands:
+        try:
+            if c.is_file():
+                return str(c)
+        except OSError:
+            continue
+    raise HTTPException(
+        500,
+        detail="本机没有 cloudflared。装过 DSH Desktop 的话它自带一份；否则去 Cloudflare 官网下 "
+               "cloudflared-windows-amd64.exe，改名 cloudflared.exe 放进插件目录（和 plugin_api.py 同一个文件夹），再点一次。",
+    )
+
+
+def _tunnel_url_in(text: str) -> str:
+    """从 cloudflared 日志里挑出真正的公网地址。"""
+    i = text.lower().find("your quick tunnel has been created")
+    scope = text[i:] if i >= 0 else text
+    m = _TUNNEL_URL_RE.search(scope)
+    if not m and i >= 0:
+        m = _TUNNEL_URL_RE.search(text)
+    return m.group(0) if m else ""
+
+
+def _tunnel_state_path() -> Path:
+    return _log_path().with_name("phone-tunnel.json")
+
+
+def _tunnel_log_path() -> Path:
+    return _log_path().with_name("phone-tunnel.log")
+
+
+def _pid_alive(pid: int) -> bool:
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)          # Windows 上 sig=0 只探活，不杀进程
+        return True
+    except OSError:
+        return False
+
+
+def _tunnel_snapshot() -> Dict[str, Any]:
+    """当前隧道状态。面板自己重启过（子进程还活着）时，靠小 json 认领它。"""
+    proc = _TUNNEL.get("proc")
+    if proc is not None and proc.poll() is None:
+        return {"running": True, "url": _TUNNEL["url"], "pid": proc.pid, "port": _TUNNEL["port"]}
+    try:
+        saved = json.loads(_tunnel_state_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"running": False, "url": "", "pid": 0, "port": 0}
+    pid = int(saved.get("pid") or 0)
+    if _pid_alive(pid):
+        _TUNNEL.update(proc=None, url=str(saved.get("url") or ""), port=int(saved.get("port") or 0))
+        return {"running": True, "url": _TUNNEL["url"], "pid": pid, "port": _TUNNEL["port"]}
+    return {"running": False, "url": "", "pid": 0, "port": 0}
+
+
+def _stop_tunnel() -> Dict[str, Any]:
+    snap = _tunnel_snapshot()
+    proc = _TUNNEL.get("proc")
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+    elif snap.get("pid"):
+        _kill(int(snap["pid"]))
+    _TUNNEL.update(proc=None, url="", port=0)
+    try:
+        _tunnel_state_path().unlink()
+    except OSError:
+        pass
+    return {"ok": True, "running": False, "url": "", "pid": 0}
+
+
+@router.get("/tunnel")
+def tunnel_status() -> Dict[str, Any]:
+    snap = _tunnel_snapshot()
+    snap["ok"] = True
+    snap["log"] = str(_tunnel_log_path())
+    snap["cloudflared"] = ""
+    try:
+        snap["cloudflared"] = _cloudflared_exe()
+    except HTTPException:
+        pass
+    return snap
+
+
+@router.post("/tunnel")
+def tunnel(body: TunnelBody) -> Dict[str, Any]:
+    """开/关公网隧道。开之前必须已经有面板密码 —— 公网地址是裸的。"""
+    from hermes_cli.config import load_config
+
+    if (body.action or "start").strip().lower() == "stop":
+        return _stop_tunnel()
+
+    snap = _tunnel_snapshot()
+    if snap["running"] and snap["url"]:
+        return {"ok": True, "running": True, "already": True, **snap}
+
+    config = load_config() or {}
+    basic = _basic_auth(config)
+    if not str(basic.get("password_hash") or basic.get("password") or "").strip():
+        raise HTTPException(400, detail="先给面板设个登录密码：公网地址谁拿到谁就能开，没密码等于全公开")
+    dash = config.get("dashboard") if isinstance(config.get("dashboard"), dict) else {}
+    raw_port = str(dash.get("port") or "").strip()
+    port = int(body.port or 0) or (int(raw_port) if raw_port.isdigit() else DEFAULT_PORT)
+
+    exe = _cloudflared_exe()
+    log = _tunnel_log_path()
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("", encoding="utf-8")
+    flags = 0
+    if os.name == "nt":
+        flags = int(getattr(subprocess, "CREATE_NO_WINDOW", 0)) | int(getattr(subprocess, "DETACHED_PROCESS", 0))
+    with open(log, "ab") as fh:
+        proc = subprocess.Popen(
+            # --protocol http2：默认 auto 会优先 QUIC，在 fake-ip/TUN 代理下会一直连不上（dsh 同款坑）
+            [exe, "tunnel", "--no-autoupdate", "--protocol", "http2", "--url", "http://127.0.0.1:%d" % port],
+            stdout=fh, stderr=fh, stdin=subprocess.DEVNULL, creationflags=flags,
+        )
+    _TUNNEL.update(proc=proc, url="", port=port)
+
+    url = ""
+    waited = 0.0
+    while waited < TUNNEL_WAIT_SECONDS:
+        time.sleep(0.5)
+        waited += 0.5
+        try:
+            text = log.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        url = _tunnel_url_in(text)
+        if url:
+            break
+        if proc.poll() is not None:
+            break
+
+    if not url:
+        _stop_tunnel()
+        detail = "隧道 %d 秒内没拿到公网地址" % int(TUNNEL_WAIT_SECONDS)
+        try:
+            detail += "：\\n" + "\\n".join(log.read_text(encoding="utf-8", errors="replace").splitlines()[-8:])
+        except OSError:
+            pass
+        raise HTTPException(502, detail=detail)
+
+    _TUNNEL["url"] = url
+    _tunnel_state_path().write_text(json.dumps({"pid": proc.pid, "url": url, "port": port}), encoding="utf-8")
+    return {
+        "ok": True, "running": True, "url": url, "pid": proc.pid, "port": port,
+        "note": "临时地址：cloudflared 一重启就换新的（cloudflare 免费隧道的固有属性）",
+        "log": str(log),
+    }
+

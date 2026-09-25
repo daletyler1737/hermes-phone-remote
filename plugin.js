@@ -2505,6 +2505,12 @@ function restBridge(ctx) {
   }
 }
 
+/* 后端抛的错统一成一句话：FastAPI 的 detail 优先，其次 message。 */
+function errText(e) {
+  const d = (e && (e.detail || e.message)) || e
+  return typeof d === 'string' ? d : JSON.stringify(d)
+}
+
 /* ─── 服务在线探测 ───────────────────────────────────────────────────────
    no-cors 模式：读不到状态码，但「连得上」就说明 9119 在监听。
    浏览器 CSP 若拦掉请求会走 catch，此时给「未检测到」而不是误报在线。 */
@@ -2601,6 +2607,15 @@ const S = {
     border: '1px solid color-mix(in srgb, var(--ui-stroke-secondary) 55%, transparent)'
   },
   cardTitle: { fontSize: '13px', fontWeight: 600 },
+  tabs: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    flexWrap: 'wrap',
+    padding: '4px',
+    borderRadius: '10px',
+    background: 'var(--chrome-action-hover)'
+  },
   grid2: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '10px' },
   okMsg: { fontSize: '12px', color: 'var(--ui-accent)', whiteSpace: 'pre-wrap' },
   warnMsg: { fontSize: '12px', color: 'var(--ui-text-secondary)', whiteSpace: 'pre-wrap' },
@@ -2687,6 +2702,9 @@ function PhonePage({ ctx }) {
   const [pwMsg, setPwMsg] = useState(null)
   const [svc, setSvc] = useState({ phase: 'loading' })
   const [log, setLog] = useState(null)
+  const [mode, setMode] = useState('lan')                 // lan = 同一 WiFi；net = 公网隧道
+  const [tun, setTun] = useState({ phase: 'loading' })    // 公网隧道状态
+
 
   const link = 'http://' + cfg.ip + ':' + cfg.port + '/'
   const localLink = 'http://127.0.0.1:' + cfg.port + '/'
@@ -2707,6 +2725,12 @@ function PhonePage({ ctx }) {
 
   const loadLog = () => rest('/login-log').then(d => setLog(d)).catch(() => {})
 
+  // 公网隧道状态：后端自己起过就还在，面板重开也能认回来。
+  const loadTun = () =>
+    rest('/tunnel')
+      .then(d => setTun({ phase: 'ok', data: d }))
+      .catch(e => setTun({ phase: 'error', error: errText(e) }))
+
   // 挂载时问一次后端：账号 / 有没有设过密码 / 面板在不在跑。
   useEffect(() => {
     let alive = true
@@ -2718,6 +2742,7 @@ function PhonePage({ ctx }) {
         if (alive) setSvc({ phase: 'error', error: String((e && e.message) || e) })
       })
     loadLog()
+    loadTun()
     return () => {
       alive = false
     }
@@ -2776,6 +2801,32 @@ function PhonePage({ ctx }) {
     }
   }
 
+  const tunUrl = (tun.data && tun.data.url) || ''
+  const tunBusy = tun.phase === 'busy'
+
+  const doTunnel = async action => {
+    if (tunBusy) return
+    setTun({ ...tun, phase: 'busy', action })
+    try {
+      const res = await rest('/tunnel', { method: 'POST', body: { action, port: Number(cfg.port) || 9119 } })
+      setTun({ phase: 'ok', data: res })
+      if (action === 'stop') {
+        os.notify('公网链接已关闭', 'info')
+      } else {
+        os.notify('公网链接已开启：' + ((res && res.url) || ''), 'info')
+      }
+    } catch (e) {
+      setTun({ phase: 'error', error: errText(e) })
+      os.notify('公网链接操作失败', 'warn')
+    }
+  }
+
+  const copyTun = async () => {
+    if (!tunUrl) return
+    const ok = await os.copy(tunUrl)
+    os.notify(ok ? '已复制公网地址' : '复制失败，请手动选中地址', ok ? 'info' : 'warn')
+  }
+
   const last = log && log.entries && log.entries.length ? log.entries[log.entries.length - 1] : null
   const logText = !log
     ? ''
@@ -2818,9 +2869,19 @@ function PhonePage({ ctx }) {
             }
           }),
           jsx('span', { children: statusText }),
-          jsx(Button, { variant: 'text', size: 'inline', onClick: recheck, children: '重新检测' }),
-          ipHint
-            ? jsx(Button, {
+          jsx(Button, { variant: 'text', size: 'inline', onClick: recheck, children: '重新检测' })
+        ]
+      }),
+
+      ipHint
+        ? jsxs('div', {
+            style: S.note,
+            children: [
+              jsx('span', {
+                style: S.sub,
+                children: '探测到本机局域网 IP 是 ' + ipHint + '，当前用的是 ' + (cfg.ip || '自动探测')
+              }),
+              jsx(Button, {
                 variant: 'secondary',
                 size: 'inline',
                 onClick: () => {
@@ -2828,23 +2889,119 @@ function PhonePage({ ctx }) {
                   setIpHint(null)
                   os.notify('已把局域网 IP 更新为 ' + ipHint, 'info')
                 },
-                children: '检测到本机 IP：' + ipHint + '，点此使用'
+                children: '用这个'
               })
-            : null
+            ]
+          })
+        : null,
+
+      jsxs('div', {
+        style: S.tabs,
+        children: [
+          jsx(Button, {
+            variant: mode === 'lan' ? 'secondary' : 'ghost',
+            size: 'sm',
+            onClick: () => setMode('lan'),
+            children: '局域网模式'
+          }),
+          jsx(Button, {
+            variant: mode === 'net' ? 'secondary' : 'ghost',
+            size: 'sm',
+            onClick: () => setMode('net'),
+            children: '互联网模式'
+          }),
+          jsx('span', {
+            style: S.sub,
+            children:
+              mode === 'lan'
+                ? '手机和电脑连同一个 WiFi —— 最快、最稳'
+                : '手机用 4G/5G 或别的网也能连 —— 走 Cloudflare 临时公网地址'
+          })
         ]
       }),
+
+      mode === 'net'
+        ? jsxs('div', {
+            style: S.card2,
+            children: [
+              jsxs('div', {
+                style: S.row,
+                children: [
+                  jsx('span', { style: S.cardTitle, children: '公网链接' }),
+                  jsx('span', {
+                    style: S.sub,
+                    children:
+                      tun.phase === 'loading'
+                        ? '正在读取…'
+                        : tunBusy
+                          ? tun.action === 'stop'
+                            ? '正在关闭…'
+                            : '正在创建（一般 5-15 秒）…'
+                          : tunUrl
+                            ? '已开启'
+                            : '未开启'
+                  })
+                ]
+              }),
+              tunUrl
+                ? jsxs('div', {
+                    style: S.row,
+                    children: [
+                      jsx('span', { style: S.val, children: tunUrl }),
+                      jsx(Button, { variant: 'outline', size: 'sm', onClick: copyTun, children: '复制' }),
+                      jsx(Button, {
+                        variant: 'ghost',
+                        size: 'sm',
+                        onClick: () => doTunnel('stop'),
+                        children: tunBusy ? '处理中…' : '关闭'
+                      })
+                    ]
+                  })
+                : jsxs('div', {
+                    style: S.row,
+                    children: [
+                      jsx(Button, {
+                        variant: 'secondary',
+                        size: 'sm',
+                        onClick: () => doTunnel('start'),
+                        children: tunBusy ? '创建中…' : '开启公网链接'
+                      }),
+                      jsx('span', { style: S.sub, children: '不开的时候，外网完全访问不到这台机器' })
+                    ]
+                  }),
+              jsx('span', {
+                style: S.sub,
+                children:
+                  '地址是临时的：面板一重启就换新的（Cloudflare 免费隧道就是这样），重开一次扫新码即可。登录用的还是上面那组账号密码。'
+              }),
+              tun.phase === 'error' ? jsx('div', { style: S.warnMsg, children: tun.error }) : null,
+              tun.phase === 'error'
+                ? jsx('span', {
+                    style: S.sub,
+                    children:
+                      '本机需要有 cloudflared.exe（装过 DSH Desktop 就有自带的）；没有的话去 Cloudflare 官网下一个，改名 cloudflared.exe 放进插件目录再点一次。'
+                  })
+                : null
+            ]
+          })
+        : null,
 
       jsxs('div', {
         style: S.card,
         children: [
-          jsx(QrImage, { text: link, size: 224 }),
+          jsx(QrImage, { text: mode === 'net' ? tunUrl || link : link, size: 224 }),
           jsxs('div', {
             style: S.col,
             children: [
               jsxs('ol', {
                 style: S.steps,
                 children: [
-                  jsx('li', { children: '手机相机 / 微信「扫一扫」对准左边的二维码' }),
+                  jsx('li', {
+                    children:
+                      mode === 'net'
+                        ? '手机（4G/5G 也行）扫左边的码，或直接打开下面的地址'
+                        : '手机相机 / 微信「扫一扫」对准左边的二维码'
+                  }),
                   jsx('li', { children: '首次打开输入下面这组账号密码，勾选「记住我」' }),
                   jsx('li', { children: '以后手机上就能聊天、切会话、看历史，和电脑端同一套会话' })
                 ]
@@ -2852,9 +3009,14 @@ function PhonePage({ ctx }) {
               jsx(Separator, {}),
               jsx(Field, {
                 label: '地址',
-                value: link,
+                value: mode === 'net' ? tunUrl || '（还没开启公网链接）' : link,
                 onCopy: async () => {
-                  const ok = await os.copy(link)
+                  const target = mode === 'net' ? tunUrl : link
+                  if (!target) {
+                    os.notify('先在上面点「开启公网链接」', 'warn')
+                    return
+                  }
+                  const ok = await os.copy(target)
                   os.notify(ok ? '已复制手机访问地址' : '复制失败，请手动选中地址', ok ? 'info' : 'warn')
                 }
               }),
