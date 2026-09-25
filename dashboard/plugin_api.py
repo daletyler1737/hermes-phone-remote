@@ -39,7 +39,30 @@ from pydantic import BaseModel
 
 router = APIRouter()
 
-MIN_PASSWORD_LEN = 6
+MIN_PASSWORD_LEN = 12         # 面板是公网可达的（互联网模式），弱密码等于把整台机器送人
+
+
+def password_problem(password: str):
+    """密码策略：长度 + 四类字符。返回中文原因；合规返回 None。
+
+    前端「随机密码」按同一套规则生成（src/plugin.template.js），改这里要一起改。
+    """
+    if len(password) < MIN_PASSWORD_LEN:
+        return "密码至少 %d 位" % MIN_PASSWORD_LEN
+    missing = []
+    if not any(c.islower() for c in password):
+        missing.append("小写字母")
+    if not any(c.isupper() for c in password):
+        missing.append("大写字母")
+    if not any(c.isdigit() for c in password):
+        missing.append("数字")
+    if not any(not c.isalnum() for c in password):
+        missing.append("符号")
+    if missing:
+        return "密码还要包含：" + "、".join(missing)
+    return None
+
+
 DEFAULT_PORT = 9119
 DEFAULT_TTL_SECONDS = 12 * 60 * 60
 START_WAIT_SECONDS = 45.0
@@ -278,8 +301,9 @@ def set_password(body: PasswordBody) -> Dict[str, Any]:
     from hermes_cli.config import load_config, save_config
 
     password = (body.password or "").strip()
-    if len(password) < MIN_PASSWORD_LEN:
-        raise HTTPException(400, detail="密码至少 %d 位" % MIN_PASSWORD_LEN)
+    problem = password_problem(password)
+    if problem:
+        raise HTTPException(400, detail=problem)
 
     config = load_config() or {}
     basic = _basic_auth(config)

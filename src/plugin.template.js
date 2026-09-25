@@ -191,13 +191,25 @@ function detectLanIp() {
 const PW_ALPHABET = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789'
 /* 刻意去掉 0 O 1 l i：手机小键盘上分不清，历史踩过「密码没敲错但就是登不上」。 */
 function randomPassword(len) {
-  const n = len || 16
-  const buf = new Uint32Array(n)
-  if (typeof crypto !== 'undefined' && crypto.getRandomValues) crypto.getRandomValues(buf)
-  else for (let i = 0; i < n; i++) buf[i] = Math.floor(Math.random() * 4294967296)
-  let out = ''
-  for (let i = 0; i < n; i++) out += PW_ALPHABET[buf[i] % PW_ALPHABET.length]
-  return out
+  const n = Math.max(len || 16, 12)
+  const rnd = k => {
+    const b = new Uint32Array(k)
+    if (typeof crypto !== 'undefined' && crypto.getRandomValues) crypto.getRandomValues(b)
+    else for (let i = 0; i < k; i++) b[i] = Math.floor(Math.random() * 4294967296)
+    return b
+  }
+  const buf = rnd(n)
+  const out = Array.from({ length: n }, (_, i) => PW_ALPHABET[buf[i] % PW_ALPHABET.length])
+  /* 四类各塞一个：策略要求，见 dashboard/plugin_api.py password_problem()。
+     PW_ALPHABET 就是「23 小写 + 23 大写 + 8 数字」拼的，切片拿到三类，符号另给。 */
+  const sets = [PW_ALPHABET.slice(0, 23), PW_ALPHABET.slice(23, 46), PW_ALPHABET.slice(46), '!@#$%^&*-_=+']
+  const pick = rnd(sets.length)
+  sets.forEach((s, i) => { out[i] = s[pick[i] % s.length] })
+  for (let i = n - 1; i > 0; i--) {           // 不洗牌前 4 位永远是「小写大写数字符号」
+    const j = buf[i] % (i + 1)
+    const t = out[i]; out[i] = out[j]; out[j] = t
+  }
+  return out.join('')
 }
 
 function restBridge(ctx) {
@@ -819,7 +831,7 @@ function PhonePage({ ctx }) {
                     size: 'sm',
                     type: pwShow ? 'text' : 'password',
                     value: pw,
-                    placeholder: '至少 6 位',
+                    placeholder: '至少 12 位，含大小写字母+数字+符号',
                     onChange: e => setPw(e.target.value)
                   })
                 ]
