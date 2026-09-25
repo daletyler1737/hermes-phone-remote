@@ -2717,6 +2717,47 @@ function PhonePage({ ctx }) {
   const [mode, setMode] = useState('lan')                 // lan = 同一 WiFi；net = 公网隧道
   const [tun, setTun] = useState({ phase: 'loading' })    // 公网隧道状态
   const [tunArm, setTunArm] = useState(false)              // 「开启公网链接」的两段式批准
+  const [pair, setPair] = useState({ phase: 'loading', busy: false })   // 扫码配对：每次新 token，用一次作废
+
+  const doPair = async action => {
+    setPair(p => ({ ...p, busy: true }))
+    try {
+      const res = await rest('/pair', { method: 'POST', body: { action } })
+      setPair({ phase: 'ready', busy: false, ...(res || {}) })
+      os.notify(
+        action === 'new'
+          ? '配对链接已生成：10 分钟内有效，用一次就作废'
+          : action === 'approve'
+            ? '已批准这台手机，它正在进入'
+            : '已拒绝这台手机',
+        action === 'deny' ? 'warn' : 'info'
+      )
+    } catch (e) {
+      os.notify('配对操作失败：' + String((e && e.message) || e), 'warn')
+      setPair(p => ({ ...p, busy: false }))
+    }
+  }
+
+  // 手机那头等着的时候，每 2.5 秒看一眼：扫开没、批没批、过期没
+  useEffect(() => {
+    if (mode !== 'net') return undefined
+    let stop = false
+    const tick = async () => {
+      try {
+        const r = await rest('/pair')
+        if (!stop) setPair(prev => ({ ...prev, ...(r || {}), phase: 'ready', busy: prev.busy }))
+      } catch (e) {
+        if (!stop) setPair(prev => ({ ...prev, phase: 'error', error: String((e && e.message) || e) }))
+      }
+    }
+    tick()
+    const id = setInterval(tick, 2500)
+    return () => {
+      stop = true
+      clearInterval(id)
+    }
+  }, [mode])
+
   const [ttlMin, setTtlMin] = useState(120)                // 开多久（分钟）
 
 
@@ -3054,6 +3095,121 @@ function PhonePage({ ctx }) {
                       '本机需要有 cloudflared.exe（装过 DSH Desktop 就有自带的）；没有的话去 Cloudflare 官网下一个，改名 cloudflared.exe 放进插件目录再点一次。'
                   })
                 : null
+            ]
+          })
+        : null,
+
+      mode === 'net'
+        ? jsxs('div', {
+            style: S.card,
+            children: [
+              jsxs('div', {
+                style: S.row,
+                children: [
+                  jsx('span', { style: S.cardTitle, children: '扫码配对（手机不用输密码）' }),
+                  jsx('span', {
+                    style: S.sub,
+                    children:
+                      pair.phase === 'loading'
+                        ? '正在读取…'
+                        : pair.phase === 'error'
+                          ? '读取失败'
+                          : pair.status === 'pending'
+                            ? pair.ua
+                              ? '手机已打开，等你批准'
+                              : '等待手机打开链接…'
+                            : pair.status === 'approved'
+                              ? '已批准，手机正在进入…'
+                              : pair.status === 'expired'
+                                ? '上一个链接已过期'
+                                : pair.status === 'denied'
+                                  ? '已拒绝'
+                                  : '没有等着的配对'
+                  })
+                ]
+              }),
+              pair.url
+                ? jsxs('div', {
+                    style: S.row,
+                    children: [
+                      jsx(QrImage, { text: pair.url, size: 160 }),
+                      jsxs('div', {
+                        style: S.col,
+                        children: [
+                          jsx('span', { style: S.val, children: pair.url }),
+                          jsx('span', {
+                            style: S.sub,
+                            children:
+                              '用一次就作废' +
+                              (pair.expires_at
+                                ? '，到 ' +
+                                  new Date(pair.expires_at * 1000).toTimeString().slice(0, 5) +
+                                  ' 还没批也失效'
+                                : '')
+                          }),
+                          pair.status === 'pending' && (pair.ip || pair.ua)
+                            ? jsx('span', {
+                                style: S.sub,
+                                children:
+                                  '来自 ' +
+                                  (pair.ip || '手机') +
+                                  (pair.ua ? ' · ' + String(pair.ua).slice(0, 44) : '')
+                              })
+                            : null,
+                          jsxs('div', {
+                            style: S.row,
+                            children: [
+                              jsx(Button, {
+                                variant: 'default',
+                                size: 'sm',
+                                disabled: pair.busy || pair.status !== 'pending',
+                                onClick: () => doPair('approve'),
+                                children: pair.status === 'approved' ? '已批准' : '批准此手机'
+                              }),
+                              jsx(Button, {
+                                variant: 'ghost',
+                                size: 'sm',
+                                disabled: pair.busy,
+                                onClick: () => doPair('deny'),
+                                children: '拒绝'
+                              }),
+                              jsx(Button, {
+                                variant: 'outline',
+                                size: 'sm',
+                                disabled: pair.busy,
+                                onClick: () => doPair('new'),
+                                children: '换一个新链接'
+                              })
+                            ]
+                          }),
+                          jsx('span', {
+                            style: S.sub,
+                            children:
+                              '密码不用给手机：链接泄漏也只是多一个「待批准」的请求，你不点批准就进不来。'
+                          })
+                        ]
+                      })
+                    ]
+                  })
+                : jsxs('div', {
+                    style: S.row,
+                    children: [
+                      jsx(Button, {
+                        variant: 'secondary',
+                        size: 'sm',
+                        disabled: pair.busy || !tunUrl,
+                        onClick: () => doPair('new'),
+                        children: pair.busy ? '生成中…' : '生成配对链接'
+                      }),
+                      jsx('span', {
+                        style: S.sub,
+                        children: tunUrl
+                          ? '链接只活 10 分钟，用过 / 过期都得重新生成'
+                          : '先点上面的「开启公网链接」，配对链接才有公网地址'
+                      })
+                    ]
+                  }),
+              pair.phase === 'error' ? jsx('div', { style: S.warnMsg, children: pair.error }) : null
             ]
           })
         : null,

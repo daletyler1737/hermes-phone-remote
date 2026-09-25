@@ -26,6 +26,21 @@ const ctx = {
       return Promise.resolve({
         ok: true, running: true, url: 'https://demo-example-abc.trycloudflare.com', pid: 1234, port: 9119
       })
+    if (path === '/pair')
+      return Promise.resolve({
+        ok: true,
+        status: 'pending',
+        token_tail: '…AbCd',
+        ip: '192.168.1.85',
+        ua: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Safari/604.1',
+        url: 'https://demo-example-abc.trycloudflare.com/pair?t=demo',
+        expires_at: Date.now() / 1000 + 600,
+        proxy: true,
+        port: 9121,
+        ttl_seconds: 600,
+        tunnel: 'https://demo-example-abc.trycloudflare.com',
+        tunnel_running: true
+      })
     if (path === '/login-log')
       return Promise.resolve({ path: 'logs/dashboard-auth.log', entries: [{ ok: true, ip: '192.168.1.85', line: 'login_success ip=192.168.1.85' }] })
     return Promise.resolve({ ok: true })

@@ -526,6 +526,185 @@ def _stop_tunnel() -> Dict[str, Any]:
     return {"ok": True, "running": False, "url": "", "pid": 0}
 
 
+# ---------------------------------------------------------------------------
+# 扫码配对（pair token）—— 「批准此手机」免密进面板
+#
+# 为什么要有反代：官方 auth gate 把插件路由全拦在登录之后，公网隧道域名下没有一个
+# 「谁都能打开」的页面能给手机种 cookie。所以 /pair* 交给 tools/pair_proxy.py：
+# 反代自己渲染「等待批准」页，批准后签发一个官方认的 session cookie，其它请求原样
+# 透传给 dashboard（SSE / WebSocket 都不受影响）。
+#
+# token 一次性：每次「生成配对链接」都是新 token，用过即废、10 分钟不批也废
+# （用户原话「每次 token 要变」）。
+# ---------------------------------------------------------------------------
+
+PAIR_PORT = 9121              # 反代只听 127.0.0.1，只有 cloudflared 连得到
+PAIR_TTL_SECONDS = 600.0      # 配对链接有效期
+PAIR_APPROVE_WINDOW = 120.0   # 批准后手机必须在这段时间内 claim
+_PAIR: Dict[str, Any] = {"proc": None, "log": None}
+
+
+def _pair_dir() -> Path:
+    base = os.environ.get("LOCALAPPDATA") or os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".hermes")
+    d = Path(base) / "hermes" / "phone-remote"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _pair_state_path() -> Path:
+    return _pair_dir() / "pair.json"
+
+
+def _pair_read() -> Dict[str, Any]:
+    try:
+        data = json.loads(_pair_state_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _pair_write(state: Dict[str, Any]) -> Dict[str, Any]:
+    p = _pair_state_path()
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, p)
+    return state
+
+
+def _pair_script() -> Path:
+    here = Path(__file__).resolve().parent
+    for cand in (here / "tools" / "pair_proxy.py", here.parent / "tools" / "pair_proxy.py",
+                 here / "pair_proxy.py"):
+        if cand.is_file():
+            return cand
+    raise HTTPException(500, detail="插件里没有 pair_proxy.py（安装包不完整），重装一次插件")
+
+
+def _pair_alive() -> bool:
+    return _port_open(PAIR_PORT)
+
+
+def _pair_log_path() -> Path:
+    return _pair_dir() / "pair-proxy.log"
+
+
+def _start_pair_proxy(port: int) -> None:
+    """起配对反代；已经在跑（或端口已有人听）就不动它。"""
+    proc = _PAIR.get("proc")
+    if proc is not None and proc.poll() is None:
+        return
+    if _port_open(PAIR_PORT):
+        _PAIR["proc"] = None
+        return
+    log = _pair_log_path()
+    log.parent.mkdir(parents=True, exist_ok=True)
+    flags = 0
+    if os.name == "nt":
+        flags = int(getattr(subprocess, "CREATE_NO_WINDOW", 0)) | int(getattr(subprocess, "DETACHED_PROCESS", 0))
+    env = dict(os.environ)
+    env.update(HPR_PORT=str(PAIR_PORT), HPR_UPSTREAM="127.0.0.1:%d" % port, HPR_STATE=str(_pair_state_path()))
+    with open(log, "ab") as fh:
+        _PAIR["proc"] = subprocess.Popen(
+            [sys.executable, str(_pair_script())], env=env, stdout=fh, stderr=fh,
+            stdin=subprocess.DEVNULL, creationflags=flags)
+    _PAIR["log"] = log
+    waited = 0.0
+    while waited < 8.0 and not _port_open(PAIR_PORT):
+        time.sleep(0.25)
+        waited += 0.25
+    if not _port_open(PAIR_PORT):
+        raise HTTPException(500, detail="配对反代没起来，看日志：%s" % log)
+
+
+def _pair_snapshot() -> Dict[str, Any]:
+    state = _pair_read()
+    now = time.time()
+    token = str(state.get("token") or "")
+    status = str(state.get("status") or "") if token else "none"
+    if token and status in ("pending", "approved") and float(state.get("expires") or 0) <= now:
+        status = "expired"
+    return {
+        "status": status,
+        "token_tail": ("…" + token[-4:]) if token else "",
+        "ip": str(state.get("ip") or ""),
+        "ua": str(state.get("ua") or ""),
+        "created": float(state.get("created") or 0.0),
+        "expires_at": float(state.get("expires") or 0.0),
+        "approved_at": float(state.get("approved_at") or 0.0),
+    }
+
+
+class PairBody(BaseModel):
+    action: str = "new"
+
+
+@router.get("/pair")
+def pair_status() -> Dict[str, Any]:
+    snap = _tunnel_snapshot()
+    out = _pair_snapshot()
+    tunnel = str(snap.get("url") or "")
+    out.update(ok=True, proxy=bool(_pair_alive()), port=PAIR_PORT, ttl_seconds=PAIR_TTL_SECONDS,
+               tunnel=tunnel, tunnel_running=bool(snap.get("running")), log=str(_pair_log_path()))
+    if out["status"] in ("pending", "approved") and tunnel:
+        out["url"] = "%s/pair?t=%s" % (tunnel.rstrip("/"), _pair_read().get("token", ""))
+    else:
+        out["url"] = ""
+    return out
+
+
+@router.post("/pair")
+def pair(body: PairBody) -> Dict[str, Any]:
+    """生成 / 批准 / 拒绝 一次扫码配对。"""
+    import secrets as _secrets  # noqa: PLC0415
+    from hermes_cli.config import load_config  # noqa: PLC0415
+
+    action = (body.action or "new").strip().lower()
+    if action in ("approve", "deny", "cancel"):
+        state = _pair_read()
+        if not state.get("token"):
+            raise HTTPException(400, detail="没有等着的配对请求：先点「生成配对链接」")
+        if action != "approve":
+            # deny 保留 token：手机那边要看到「已被拒绝」，而不是「链接失效」。
+            # 状态不是 pending 就签不出 cookie（反代只在 approved 时签发），留着没风险。
+            state.update(status="denied" if action == "deny" else "none")
+            if action != "deny":
+                state.pop("token", None)   # cancel：面板自己收尾，链接立刻作废
+            _pair_write(state)
+            return {"ok": True, "status": state["status"]}
+        if float(state.get("expires") or 0) <= time.time():
+            raise HTTPException(400, detail="这个配对链接已经过期了，重新生成一个")
+        if state.get("status") != "pending":
+            raise HTTPException(400, detail="这个配对链接已经用过了，重新生成一个")
+        state.update(status="approved", approved_at=time.time(), expires=time.time() + PAIR_APPROVE_WINDOW)
+        _pair_write(state)
+        return {"ok": True, **{k: v for k, v in _pair_snapshot().items()}}
+
+    # action == new（默认）：一次一个 token，旧的立刻作废
+    config = load_config() or {}
+    basic = _basic_auth(config)
+    if not str(basic.get("password_hash") or basic.get("password") or "").strip():
+        raise HTTPException(400, detail="先给面板设个登录密码：配对就是把登录态塞给手机，没密码等于全公开")
+    if not str(basic.get("secret") or "").strip():
+        raise HTTPException(400, detail="面板 basic_auth 里没有 secret（签名密钥），配对签不出登录态")
+    dash = config.get("dashboard") if isinstance(config.get("dashboard"), dict) else {}
+    raw_port = str(dash.get("port") or "").strip()
+    port = int(raw_port) if raw_port.isdigit() else DEFAULT_PORT
+    _start_pair_proxy(port)
+
+    snap = _tunnel_snapshot()
+    tunnel = str(snap.get("url") or "")
+    token = _secrets.token_urlsafe(24)
+    _pair_write({"token": token, "status": "pending", "created": time.time(),
+                 "expires": time.time() + PAIR_TTL_SECONDS, "ip": "", "ua": "", "tunnel": tunnel})
+    out = _pair_snapshot()
+    out.update(ok=True, proxy=True, port=PAIR_PORT, ttl_seconds=PAIR_TTL_SECONDS,
+               tunnel=tunnel, tunnel_running=bool(snap.get("running")))
+    out["url"] = "%s/pair?t=%s" % (tunnel.rstrip("/"), token) if tunnel else ""
+    out["note"] = ("公网隧道没开：开了隧道手机才打得开这个链接" if not tunnel
+                   else "手机扫码/打开链接 → 在这台电脑上点「批准」→ 手机自动进去，不用输密码")
+    return out
+
+
 @router.get("/tunnel")
 def tunnel_status() -> Dict[str, Any]:
     snap = _tunnel_snapshot()
@@ -571,6 +750,9 @@ def tunnel(body: TunnelBody) -> Dict[str, Any]:
     raw_port = str(dash.get("port") or "").strip()
     port = int(body.port or 0) or (int(raw_port) if raw_port.isdigit() else DEFAULT_PORT)
 
+    # 隧道指向配对反代（而不是裸 dashboard）：反代把 /pair* 拦下来自己处理，
+    # 其余请求原样透传 —— 没有它，公网域名下就没有「谁都能打开」的配对页。
+    _start_pair_proxy(port)
     exe = _cloudflared_exe()
     log = _tunnel_log_path()
     log.parent.mkdir(parents=True, exist_ok=True)
@@ -581,7 +763,7 @@ def tunnel(body: TunnelBody) -> Dict[str, Any]:
     with open(log, "ab") as fh:
         proc = subprocess.Popen(
             # --protocol http2：默认 auto 会优先 QUIC，在 fake-ip/TUN 代理下会一直连不上（dsh 同款坑）
-            [exe, "tunnel", "--no-autoupdate", "--protocol", "http2", "--url", "http://127.0.0.1:%d" % port],
+            [exe, "tunnel", "--no-autoupdate", "--protocol", "http2", "--url", "http://127.0.0.1:%d" % PAIR_PORT],
             stdout=fh, stderr=fh, stdin=subprocess.DEVNULL, creationflags=flags,
         )
     _TUNNEL.update(proc=proc, url="", port=port)

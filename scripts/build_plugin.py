@@ -52,7 +52,13 @@ def install_backend() -> None:
     dest.mkdir(parents=True, exist_ok=True)
     for name in ("manifest.json", "plugin_api.py"):
         (dest / name).write_text((src / name).read_text(encoding="utf-8"), encoding="utf-8", newline=LF)
+    # 扫码配对反代：后端会拿 venv python 跑它（<dashboard>/tools/pair_proxy.py）
+    tools_dest = dest / "tools"
+    tools_dest.mkdir(parents=True, exist_ok=True)
+    (tools_dest / "pair_proxy.py").write_text(
+        (HERE / "tools" / "pair_proxy.py").read_text(encoding="utf-8"), encoding="utf-8", newline=LF)
     print("已安装后端: %s" % dest)
+    print("已安装配对反代: %s" % (tools_dest / "pair_proxy.py"))
 
 
 # 用户插件的 Python 后端只有进了 plugins.enabled 白名单才会被 dashboard 导入
