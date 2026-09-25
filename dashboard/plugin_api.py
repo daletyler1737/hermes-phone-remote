@@ -218,6 +218,44 @@ def _start_dashboard(port: int, host: str) -> int:
     return proc.pid
 
 
+def _respawn_script() -> Path:
+    """脱离式重启助手（装到 dashboard/tools/，源码工程里在 tools/）。"""
+    here = Path(__file__).resolve().parent
+    for cand in (here / "tools" / "dashboard_respawn.py", here.parent / "tools" / "dashboard_respawn.py"):
+        if cand.is_file():
+            return cand
+    raise HTTPException(500, detail="插件里没有 dashboard_respawn.py（安装包不完整），重装一次插件")
+
+
+def _respawn_self(port: int, host: str) -> int:
+    """自杀式重启：把「杀自己 + 拉起新面板」交给脱离的助手进程。
+
+    不能在这个请求里直接 _kill(os.getpid())：要杀的就是正在处理本请求的进程，
+    杀完下面「等新面板起来」的代码根本不会再执行；而 _kill 对自身 PID 只会
+    返回 False，于是旧进程一直占着端口，新进程撞 BACKEND_PORT_IN_USE ——
+    用户看到的就是「点了重启，其实什么都没换，密码还是旧的生效」。
+    助手先等我们把响应发出去，再杀旧进程、等端口空出来、拉起新面板。
+    """
+    flags = 0
+    if os.name == "nt":
+        flags = (
+            int(getattr(subprocess, "DETACHED_PROCESS", 0))
+            | int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+            | int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        )
+    log = _log_path()
+    with open(log, "ab") as fh:
+        fh.write(("\n--- %s restart (self-restart via helper) ---\n" % time.strftime("%Y-%m-%d %H:%M:%S")).encode("utf-8"))
+        proc = subprocess.Popen(
+            [sys.executable, str(_respawn_script()), "--port", str(port), "--host", host,
+             "--old-pid", str(os.getpid()), "--wait", "2", "--exe", _hermes_exe(), "--log", str(log)],
+            stdout=fh, stderr=fh, stdin=subprocess.DEVNULL,
+            creationflags=flags, start_new_session=(os.name != "nt"),
+            env=_dashboard_env(), close_fds=True,
+        )
+    return proc.pid
+
+
 def _hash_password(password: str) -> str:
     """复用官方 dashboard_auth/basic 的 hash（和 CLI 改出来的一模一样）。"""
     for loader in (
@@ -340,7 +378,25 @@ def restart(body: RestartBody) -> Dict[str, Any]:
     port = int(body.port or 0) or DEFAULT_PORT
     host = (body.host or "0.0.0.0").strip() or "0.0.0.0"
 
-    killed = [pid for pid in _listeners(port) if _kill(pid)]
+    listeners = _listeners(port)
+    if os.getpid() in listeners:
+        # 面板本身就跑在这个进程里 —— 只能走自杀式重启（见 _respawn_self）：
+        # 直接杀自己，后面这些代码不会执行，端口也腾不出来。
+        helper = _respawn_self(port, host)
+        return {
+            "ok": True,
+            "mode": "self-restart",
+            "port": port,
+            "helper_pid": helper,
+            "killed": [],
+            "pid": 0,
+            "waited_seconds": 0.0,
+            "lan_url": "http://%s:%d/" % (_lan_ip(), port),
+            "log": str(_log_path()),
+            "detail": "面板正在重启（1-3 秒）：先发完这条响应，再由助手进程换掉旧的，页面刷新即可；改过的密码这时才真正生效",
+        }
+
+    killed = [pid for pid in listeners if _kill(pid)]
     if killed:
         time.sleep(1.5)
 
@@ -763,7 +819,11 @@ def tunnel(body: TunnelBody) -> Dict[str, Any]:
     with open(log, "ab") as fh:
         proc = subprocess.Popen(
             # --protocol http2：默认 auto 会优先 QUIC，在 fake-ip/TUN 代理下会一直连不上（dsh 同款坑）
-            [exe, "tunnel", "--no-autoupdate", "--protocol", "http2", "--url", "http://127.0.0.1:%d" % PAIR_PORT],
+            # --edge-ip-version 4：本机 IPv6 到 Cloudflare 边缘会 i/o timeout
+            # （日志：TLS handshake with edge error: read tcp [2408:...]->[2606:4700:a0::8]:7844），
+            # auto 先挑 IPv6 → 隧道反复掉线，手机报 Error 1033。强制 IPv4。
+            [exe, "tunnel", "--no-autoupdate", "--protocol", "http2",
+             "--edge-ip-version", "4", "--url", "http://127.0.0.1:%d" % PAIR_PORT],
             stdout=fh, stderr=fh, stdin=subprocess.DEVNULL, creationflags=flags,
         )
     _TUNNEL.update(proc=proc, url="", port=port)

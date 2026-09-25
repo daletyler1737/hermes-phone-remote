@@ -244,31 +244,35 @@ def _client_of(headers: bytes) -> tuple[str, str]:
 
 
 # ---------------------------------------------------------------- 透传
-def _pump(a: socket.socket, b: socket.socket) -> None:
-    a.setblocking(False)
-    b.setblocking(False)
-    socks = (a, b)
-    while True:
-        try:
-            ready, _, _ = select.select(socks, (), (), 300)
-        except (OSError, ValueError):
-            return
-        if not ready:
-            return
-        for s in ready:
-            other = b if s is a else a
-            try:
-                data = s.recv(65536)
-            except (BlockingIOError, InterruptedError):
-                continue
-            except OSError:
-                return
+def _pipe(src: socket.socket, dst: socket.socket) -> None:
+    """单向搬运。阻塞 recv/sendall：sendall 自带背压等待，不会丢数据。"""
+    try:
+        while True:
+            data = src.recv(65536)
             if not data:
-                return
-            try:
-                other.sendall(data)
-            except OSError:
-                return
+                break
+            dst.sendall(data)
+    except OSError:
+        pass
+    finally:
+        try:
+            # 半关：只结束这个方向，另一个方向接着收（客户端半关请求体是常态）
+            dst.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+
+
+def _pump(a: socket.socket, b: socket.socket) -> None:
+    """双向透传：两条阻塞线程，各管一个方向。
+
+    别改回 select + 非阻塞 sendall（踩过）：对端读得慢时（手机加载大资源、
+    cloudflared 反压）非阻塞 sendall 抛 BlockingIOError，被 except OSError 吞掉 →
+    连接半路关闭 → cloudflared 报 "Failed to proxy HTTP: unexpected EOF"，手机白屏。
+    """
+    other = threading.Thread(target=_pipe, args=(b, a), daemon=True)
+    other.start()
+    _pipe(a, b)
+    other.join(timeout=10)
 
 
 def _handle(conn: socket.socket) -> None:
@@ -291,6 +295,7 @@ def _handle(conn: socket.socket) -> None:
         if parts[1].split("?")[0].split("/")[1:2] == ["pair"]:
             return _serve_pair(conn, parts[1], head)
         up = socket.create_connection(UPSTREAM, timeout=10)
+        up.settimeout(None)   # 建连超时用完就撤，别让 10s 读超时把长连接掐了
         up.sendall(head + b"\r\n\r\n" + rest)
         conn.settimeout(None)
         _pump(conn, up)
