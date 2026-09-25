@@ -159,6 +159,16 @@ def _log_path() -> Path:
     return base / "dashboard-restart.log"
 
 
+def _dashboard_env() -> Dict[str, str]:
+    """桌面版后端 env 里的 HERMES_WEB_DIST 指向 Electron 渲染层（app.asar/dist），
+    继承给独立 dashboard 后，浏览器打开的就是 Electron 前端 → 报
+    「Desktop IPC bridge is unavailable」。剥掉它，让 CLI 用 web UI 的 dist。"""
+    env = os.environ.copy()
+    if "app.asar" in env.get("HERMES_WEB_DIST", "").replace("\\", "/"):
+        env.pop("HERMES_WEB_DIST", None)
+    return env
+
+
 def _start_dashboard(port: int, host: str) -> int:
     """后台拉一个 dashboard（不弹窗、关掉终端也活着）。返回 PID。"""
     flags = 0
@@ -173,6 +183,7 @@ def _start_dashboard(port: int, host: str) -> int:
             [_hermes_exe(), "dashboard", "--host", host, "--port", str(port), "--no-open", "--skip-build"],
             stdout=fh, stderr=fh, stdin=subprocess.DEVNULL,
             creationflags=flags, start_new_session=(os.name != "nt"),
+            env=_dashboard_env(),
         )
     return proc.pid
 
