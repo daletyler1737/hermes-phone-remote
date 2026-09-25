@@ -6,6 +6,10 @@ phone-qr.png
 phone-qr.html
 hermes-phone/
 
+# 前端依赖 / 渲染自测产物
+node_modules/
+tools/render-test/plugin.mjs
+
 # Python
 __pycache__/
 *.pyc

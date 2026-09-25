@@ -2480,6 +2480,31 @@ function detectLanIp() {
   })
 }
 
+/* ─── 面板改密码：借 Hermes 给插件的后端通道 ───────────────────────────────
+   面板只能画界面，改 config.yaml / 重启服务都得下有后端。官方通道是
+   ctx.rest(path) → /api/plugins/phone-remote/<path>（走桌面版自己的 IPC 桥，
+   同源、免 CORS、自动带当前 profile），后端实现见仓库 dashboard/plugin_api.py。
+   后端没装时 rest 会抛错 —— 这时给一句人话提示，不是白屏。 */
+const PW_ALPHABET = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789'
+/* 刻意去掉 0 O 1 l i：手机小键盘上分不清，历史踩过「密码没敲错但就是登不上」。 */
+function randomPassword(len) {
+  const n = len || 16
+  const buf = new Uint32Array(n)
+  if (typeof crypto !== 'undefined' && crypto.getRandomValues) crypto.getRandomValues(buf)
+  else for (let i = 0; i < n; i++) buf[i] = Math.floor(Math.random() * 4294967296)
+  let out = ''
+  for (let i = 0; i < n; i++) out += PW_ALPHABET[buf[i] % PW_ALPHABET.length]
+  return out
+}
+
+function restBridge(ctx) {
+  const fn = ctx && typeof ctx.rest === 'function' ? ctx.rest.bind(ctx) : null
+  return async (path, opts) => {
+    if (!fn) throw new Error('当前桌面版没给插件后端通道（ctx.rest 不存在）')
+    return await fn(path, opts)
+  }
+}
+
 /* ─── 服务在线探测 ───────────────────────────────────────────────────────
    no-cors 模式：读不到状态码，但「连得上」就说明 9119 在监听。
    浏览器 CSP 若拦掉请求会走 catch，此时给「未检测到」而不是误报在线。 */
@@ -2565,7 +2590,20 @@ const S = {
     background: 'var(--chrome-action-hover)',
     fontSize: '12px'
   },
-  dot: { width: '8px', height: '8px', borderRadius: '50%', flex: '0 0 auto' }
+  dot: { width: '8px', height: '8px', borderRadius: '50%', flex: '0 0 auto' },
+  card2: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '10px',
+    padding: '14px 16px',
+    borderRadius: '10px',
+    background: 'var(--ui-bg-quaternary)',
+    border: '1px solid color-mix(in srgb, var(--ui-stroke-secondary) 55%, transparent)'
+  },
+  cardTitle: { fontSize: '13px', fontWeight: 600 },
+  grid2: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '10px' },
+  okMsg: { fontSize: '12px', color: 'var(--ui-accent)', whiteSpace: 'pre-wrap' },
+  warnMsg: { fontSize: '12px', color: 'var(--ui-text-secondary)', whiteSpace: 'pre-wrap' },
 }
 
 /* ─── 二维码渲染：把矩阵按行合并成一条 SVG path ───────────────────────── */
@@ -2642,6 +2680,13 @@ function PhonePage({ ctx }) {
   const [showSettings, setShowSettings] = useState(false)
   const [draft, setDraft] = useState(null)
   const [ipHint, setIpHint] = useState(null)
+  const rest = useMemo(() => restBridge(ctx), [ctx])
+  const [pw, setPw] = useState('')
+  const [pwShow, setPwShow] = useState(false)
+  const [pwBusy, setPwBusy] = useState('')
+  const [pwMsg, setPwMsg] = useState(null)
+  const [svc, setSvc] = useState({ phase: 'loading' })
+  const [log, setLog] = useState(null)
 
   const link = 'http://' + cfg.ip + ':' + cfg.port + '/'
   const localLink = 'http://127.0.0.1:' + cfg.port + '/'
@@ -2660,7 +2705,95 @@ function PhonePage({ ctx }) {
     }
   }, [])
 
+  const loadLog = () => rest('/login-log').then(d => setLog(d)).catch(() => {})
+
+  // 挂载时问一次后端：账号 / 有没有设过密码 / 面板在不在跑。
+  useEffect(() => {
+    let alive = true
+    rest('/status')
+      .then(d => {
+        if (alive) setSvc({ phase: 'ok', data: d })
+      })
+      .catch(e => {
+        if (alive) setSvc({ phase: 'error', error: String((e && e.message) || e) })
+      })
+    loadLog()
+    return () => {
+      alive = false
+    }
+  }, [rest])
+
   const edit = patch => setDraft({ ...d, ...patch })
+
+  const sayPw = (text, ok) => setPwMsg({ text, ok })
+
+  const doRandom = () => {
+    const p = randomPassword(16)
+    setPw(p)
+    setPwShow(true)
+    sayPw('已生成随机密码（去掉了容易看错的字符），点「确认更改」写入', true)
+  }
+
+  const doChange = async () => {
+    if (pwBusy) return
+    const value = pw.trim()
+    if (!value) {
+      sayPw('先填新密码，或点「随机密码」生成一个', false)
+      return
+    }
+    setPwBusy('save')
+    try {
+      const res = await rest('/password', { method: 'POST', body: { password: value, username: cfg.user || undefined } })
+      const user = (res && res.username) || cfg.user
+      saveCfg({ ...cfg, user, pass: value }) // 面板上显示的密码跟着换新（明文只落在插件自己的 storage）
+      setPw('')
+      sayPw('已写入 config.yaml · 账号 ' + user + ' 的新密码要等「重启面板」之后才生效', true)
+      os.notify('密码已更新，点「重启面板」生效', 'info')
+    } catch (e) {
+      sayPw('改密码失败：' + ((e && e.message) || e), false)
+    } finally {
+      setPwBusy('')
+    }
+  }
+
+  const doRestart = async () => {
+    if (pwBusy) return
+    setPwBusy('restart')
+    try {
+      const res = await rest('/restart', { method: 'POST', body: { port: Number(cfg.port) || 9119 } })
+      if (res && res.ok) {
+        sayPw('面板已重启 · ' + (res.lan_url || '端口 ' + res.port) + '（清掉 ' + (res.killed || []).length + ' 个旧进程）', true)
+        recheck()
+        loadLog()
+        os.notify('面板已重启', 'info')
+      } else {
+        sayPw('面板没起来：' + ((res && res.detail) || '未知原因') + ((res && res.tail) ? '\n' + res.tail : ''), false)
+      }
+    } catch (e) {
+      sayPw('重启失败：' + ((e && e.message) || e), false)
+    } finally {
+      setPwBusy('')
+    }
+  }
+
+  const last = log && log.entries && log.entries.length ? log.entries[log.entries.length - 1] : null
+  const logText = !log
+    ? ''
+    : last
+      ? '最近一次手机登录：' + (last.ok ? '成功' : '失败') + (last.ip ? ' · ' + last.ip : '')
+      : '还没有手机登录过'
+
+  const svcText =
+    svc.phase === 'loading'
+      ? '正在读取面板状态…'
+      : svc.phase === 'error'
+        ? '面板后端还没挂上（重启一次 Hermes 桌面版即可）：' + svc.error
+        : '账号 ' +
+          svc.data.username +
+          ' · ' +
+          (svc.data.hash_set ? '已设置密码' : '还没设密码') +
+          ' · 服务' +
+          (svc.data.running ? '在跑' : '没在跑')
 
   const statusText =
     status.phase === 'online'
@@ -2787,15 +2920,88 @@ function PhonePage({ ctx }) {
       }),
 
       jsxs('div', {
+        style: S.card2,
+        children: [
+          jsxs('div', {
+            style: S.row,
+            children: [
+              jsx('span', { style: S.cardTitle, children: '登录密码' }),
+              jsx('span', { style: S.sub, children: svcText })
+            ]
+          }),
+          jsxs('div', {
+            style: S.grid2,
+            children: [
+              jsxs('div', {
+                style: S.field,
+                children: [
+                  jsx('span', { style: S.fieldKey, children: '账号' }),
+                  jsx(Input, {
+                    size: 'sm',
+                    value: d.user || '',
+                    placeholder: 'admin',
+                    onChange: e => edit({ user: e.target.value })
+                  })
+                ]
+              }),
+              jsxs('div', {
+                style: S.field,
+                children: [
+                  jsx('span', { style: S.fieldKey, children: '新密码' }),
+                  jsx(Input, {
+                    size: 'sm',
+                    type: pwShow ? 'text' : 'password',
+                    value: pw,
+                    placeholder: '至少 6 位',
+                    onChange: e => setPw(e.target.value)
+                  })
+                ]
+              })
+            ]
+          }),
+          jsxs('div', {
+            style: S.row,
+            children: [
+              jsx(Button, { variant: 'ghost', size: 'sm', onClick: doRandom, children: '随机密码' }),
+              jsx(Button, {
+                variant: 'secondary',
+                size: 'sm',
+                onClick: doChange,
+                children: pwBusy === 'save' ? '写入中…' : '确认更改'
+              }),
+              jsx(Button, {
+                variant: 'outline',
+                size: 'sm',
+                onClick: doRestart,
+                children: pwBusy === 'restart' ? '重启中…' : '重启面板'
+              }),
+              jsx(Button, {
+                variant: 'text',
+                size: 'inline',
+                onClick: () => setPwShow(!pwShow),
+                children: pwShow ? '隐藏' : '显示'
+              })
+            ]
+          }),
+          logText ? jsx('span', { style: S.sub, children: logText }) : null,
+          pwMsg ? jsx('div', { style: pwMsg.ok ? S.okMsg : S.warnMsg, children: pwMsg.text }) : null,
+          jsx('span', {
+            style: S.sub,
+            children: '改完密码要点「重启面板」才生效 —— 密码是服务启动时读进内存的，重启前旧密码照样能登。'
+          })
+        ]
+      }),
+
+      jsxs('div', {
         style: S.note,
         children: [
           jsx('span', { children: '·' }),
           jsxs('span', {
             children: [
               jsx('b', { children: '状态是「未检测到」？' }),
-              ' 说明后台服务没在跑 —— 双击脚本目录里的 ',
+              ' 说明后台服务没在跑 —— 点上面「重启面板」拉起来（等价于双击 ',
               jsx('code', { children: '启动手机网页-Start-Phone-Web.bat' }),
-              ' 再点「重新检测」（服务监听 0.0.0.0:',
+              '，服务监听 0.0.0.0:',
               cfg.port,
               '，防火墙入站规则 ',
               jsx('code', { children: 'Hermes Phone Chat ' + cfg.port }),
@@ -2811,7 +3017,7 @@ function PhonePage({ ctx }) {
             variant: 'text',
             size: 'inline',
             onClick: () => setShowSettings(!showSettings),
-            children: (showSettings ? '▾' : '▸') + ' 设置（局域网 IP / 端口 / 账号 / 密码）'
+            children: (showSettings ? '▾' : '▸') + ' 设置（局域网 IP / 端口 / 显示用的账号密码）'
           }),
           showSettings
             ? jsxs('div', {
@@ -2891,7 +3097,7 @@ function PhonePage({ ctx }) {
                       }),
                       jsx('span', {
                         style: S.sub,
-                        children: '密码用 hermes config get dashboard.basic_auth.password 查；手机端首次登录后浏览器会记住。'
+                        children: '这里的账号 / 密码只是本机备注（显示用）；真正生效的密码在上面「登录密码」里改。'
                       })
                     ]
                   })
@@ -2911,7 +3117,7 @@ export default {
   register(ctx) {
     // 加载探针：宿主把 renderer console 转发进 logs/desktop.log，
     // 这行日志是「插件确实被加载」的外部可验证证据。
-    console.log('[phone-remote] loaded v2 — 连接手机插件已注册（状态灯 + IP 探测）')
+    console.log('[phone-remote] loaded v3 — 连接手机插件已注册（状态灯 + IP 探测 + 面板改密码）')
     try {
       store = ctx.storage
     } catch {
