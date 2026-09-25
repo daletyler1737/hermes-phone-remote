@@ -8,3 +8,4 @@ SRC="${1:-$LOCALAPPDATA/hermes/desktop-plugins/phone-remote/plugin.js}"
 [ -f "$SRC" ] || { echo "找不到 $SRC —— 先跑 python scripts/build_plugin.py --install"; exit 1; }
 cp -f "$SRC" ./plugin.mjs
 node harness.mjs
+node harness-net.mjs

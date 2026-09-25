@@ -2718,6 +2718,7 @@ function PhonePage({ ctx }) {
   const [tun, setTun] = useState({ phase: 'loading' })    // 公网隧道状态
   const [tunArm, setTunArm] = useState(false)              // 「开启公网链接」的两段式批准
   const [pair, setPair] = useState({ phase: 'loading', busy: false })   // 扫码配对：每次新 token，用一次作废
+  const [pwFallback, setPwFallback] = useState(false)   // ponytail: 互联网模式下二维码/账号密码那块默认收起，主路径是扫码配对；老浏览器扫不了码时才展开
 
   const doPair = async action => {
     setPair(p => ({ ...p, busy: true }))
@@ -3106,7 +3107,7 @@ function PhonePage({ ctx }) {
               jsxs('div', {
                 style: S.row,
                 children: [
-                  jsx('span', { style: S.cardTitle, children: '扫码配对（手机不用输密码）' }),
+                  jsx('span', { style: S.cardTitle, children: '手机连接 · 免密配对' }),
                   jsx('span', {
                     style: S.sub,
                     children:
@@ -3136,7 +3137,16 @@ function PhonePage({ ctx }) {
                       jsxs('div', {
                         style: S.col,
                         children: [
-                          jsx('span', { style: S.val, children: pair.url }),
+                          // ponytail: 地址不再第三遍印在卡片里，这里只给「复制链接」
+                          jsx(Button, {
+                            variant: 'ghost',
+                            size: 'sm',
+                            onClick: async () => {
+                              const ok = await os.copy(pair.url)
+                              os.notify(ok ? '已复制配对链接' : '复制失败，请用手机扫二维码', ok ? 'info' : 'warn')
+                            },
+                            children: '复制链接'
+                          }),
                           jsx('span', {
                             style: S.sub,
                             children:
@@ -3214,9 +3224,27 @@ function PhonePage({ ctx }) {
           })
         : null,
 
-      jsxs('div', {
+      mode === 'net' && !pwFallback
+        ? jsx('div', {
+            style: S.card2,
+            children: jsx(Button, {
+              variant: 'ghost',
+              size: 'sm',
+              onClick: () => setPwFallback(true),
+              children: '▸ 手机浏览器扫不了码？改用账号密码登录'
+            })
+          })
+        : jsxs('div', {
         style: S.card,
         children: [
+          mode === 'net'
+            ? jsx(Button, {
+                variant: 'ghost',
+                size: 'sm',
+                onClick: () => setPwFallback(false),
+                children: '▾ 收起账号密码登录'
+              })
+            : null,
           mode === 'net' && !tunUrl
             ? jsx('span', { style: S.sub, children: '先点上面的「开启公网链接」，这里会变成公网地址的二维码' })
             : jsx(QrImage, { text: mode === 'net' ? tunUrl : link, size: 224 }),
