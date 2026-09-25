@@ -55,5 +55,8 @@ assert A._tunnel_snapshot()["running"] is False
 # 4) 开多久：不选/选 0 → 默认 2 小时；显式给分钟数照用
 assert A._ttl_seconds(0) == A.TUNNEL_TTL_SECONDS
 assert A._ttl_seconds(30) == 1800.0
+assert A._ttl_seconds(1440) == 86400.0
+assert A._ttl_seconds(99999) == A.TUNNEL_TTL_MAX_SECONDS, "超过 24 小时要被后端压回来"
+assert A._ttl_seconds(-5) == A.TUNNEL_TTL_SECONDS
 
 print("OK tunnel ttl")

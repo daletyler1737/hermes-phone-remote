@@ -383,11 +383,14 @@ TUNNEL_WAIT_SECONDS = 60.0
 # 开一次公网链接自动活 2 小时 —— 忘了关是这类地址最大的风险，到点自己断，要续再点「延长」。
 # ponytail: 固定 2 小时，真要可调再挪进 TunnelBody。
 TUNNEL_TTL_SECONDS = 2 * 3600.0
+TUNNEL_TTL_MAX_SECONDS = 24 * 3600.0   # 上限：前端最高档 24 小时，后端也兜一道
 
 
 def _ttl_seconds(minutes: int) -> float:
     """面板选的开多久（分钟）；没选就用默认 2 小时。不给「永不」，地址不该长期挂着。"""
-    return float(minutes) * 60.0 if minutes and minutes > 0 else TUNNEL_TTL_SECONDS
+    if not minutes or minutes <= 0:
+        return TUNNEL_TTL_SECONDS
+    return min(float(minutes) * 60.0, TUNNEL_TTL_MAX_SECONDS)
 _TUNNEL_URL_RE = re.compile(r"https://(?!api\.)[a-z0-9-]+\.trycloudflare\.com")
 # cloudflared 会把控制面域名 api.trycloudflare.com 打在日志开头，先按这句提示定位再抓，
 # 否则会把控制面当成隧道地址发给手机（真踩过：面板显示 https://api.trycloudflare.com）。
