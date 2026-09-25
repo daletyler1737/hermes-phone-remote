@@ -728,11 +728,11 @@ function PhonePage({ ctx }) {
                       padding: '4px 6px', borderRadius: 6, border: '1px solid currentColor',
                       background: 'transparent', color: 'inherit', fontSize: 12
                     },
-                    children: [30, 120, 240, 360, 480, 720, 1440].map(m =>
+                    children: [30, 120, 240, 360, 480, 720, 1440, 2880, 4320].map(m =>
                       jsx('option', { value: String(m), children: ttlOf(m) })
                     )
                   }),
-                  jsx('span', { style: S.sub, children: '到点自动断开（最长 24 小时，不给「永不」）' })
+                  jsx('span', { style: S.sub, children: '到点自动断开（最长 72 小时，不给「永不」）' })
                 ]
               }),
               jsx('span', {

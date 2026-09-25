@@ -56,7 +56,8 @@ assert A._tunnel_snapshot()["running"] is False
 assert A._ttl_seconds(0) == A.TUNNEL_TTL_SECONDS
 assert A._ttl_seconds(30) == 1800.0
 assert A._ttl_seconds(1440) == 86400.0
-assert A._ttl_seconds(99999) == A.TUNNEL_TTL_MAX_SECONDS, "超过 24 小时要被后端压回来"
+assert A._ttl_seconds(4320) == 259200.0
+assert A._ttl_seconds(99999) == A.TUNNEL_TTL_MAX_SECONDS, "超过 72 小时要被后端压回来"
 assert A._ttl_seconds(-5) == A.TUNNEL_TTL_SECONDS
 
 print("OK tunnel ttl")

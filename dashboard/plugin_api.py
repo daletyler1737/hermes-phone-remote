@@ -383,7 +383,7 @@ TUNNEL_WAIT_SECONDS = 60.0
 # 开一次公网链接自动活 2 小时 —— 忘了关是这类地址最大的风险，到点自己断，要续再点「延长」。
 # ponytail: 固定 2 小时，真要可调再挪进 TunnelBody。
 TUNNEL_TTL_SECONDS = 2 * 3600.0
-TUNNEL_TTL_MAX_SECONDS = 24 * 3600.0   # 上限：前端最高档 24 小时，后端也兜一道
+TUNNEL_TTL_MAX_SECONDS = 72 * 3600.0   # 上限：前端最高档 72 小时，后端也兜一道
 
 
 def _ttl_seconds(minutes: int) -> float:
