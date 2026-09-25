@@ -409,10 +409,19 @@ def _tunnel_log_path() -> Path:
 
 
 def _pid_alive(pid: int) -> bool:
-    if not pid:
+    if not pid or pid <= 0:
         return False
+    if os.name == "nt":
+        # Windows 上 os.kill(pid, 0) 探已死的 pid 会抛 SystemError（C 层异常没清干净，
+        # 不是 OSError，catch 不住）—— 真踩过：认领隧道时把面板请求打成 500。
+        import ctypes
+        h = ctypes.windll.kernel32.OpenProcess(0x1000, False, int(pid))  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        ctypes.windll.kernel32.CloseHandle(h)
+        return True
     try:
-        os.kill(pid, 0)          # Windows 上 sig=0 只探活，不杀进程
+        os.kill(pid, 0)
         return True
     except OSError:
         return False
