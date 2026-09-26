@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import hmac
+import html
 import json
 import os
 import re
@@ -149,8 +150,18 @@ tick();
 </script></html>"""
 
 
+_SAFE_TOKEN = re.compile(r"[A-Za-z0-9_\-]{16,128}")   # secrets.token_urlsafe 的字符集
+
+
 def _page(token: str, host: str) -> bytes:
-    return (_PAGE.replace("__TOKEN__", token).replace("__ADDR__", host)).encode("utf-8")
+    """配对页：token 与 Host 都是外部输入，落 HTML 前先收敛。
+
+    token 走 URL-safe 白名单（不合规就当空串，反正也匹配不到状态），Host 直接
+    html-escape —— 这两个位置是反射型 XSS 的入口（Host 由客户端随便填）。
+    """
+    tok = token if _SAFE_TOKEN.fullmatch(token) else ""
+    return (_PAGE.replace("__TOKEN__", html.escape(tok, quote=True))
+                 .replace("__ADDR__", html.escape(host[:120], quote=True))).encode("utf-8")
 
 
 _INVALID_PAGE = ("""<!doctype html><html lang="zh"><meta charset="utf-8">
@@ -232,12 +243,15 @@ def _serve_pair(conn: socket.socket, target: str, headers: bytes) -> None:
 def _client_of(headers: bytes) -> tuple[str, str]:
     """手机 IP / UA（面板上给用户看一眼「是不是这台手机」）。"""
     ip, ua = "", ""
-    real = re.search(rb"\r\nX-Forwarded-For: *([^\r\n]+)", headers, re.I)
-    if real:
-        ip = real.group(1).decode("latin-1").split(",")[0].strip()
+    # CF-Connecting-IP 由 Cloudflare 写入，客户端伪造不了；X-Forwarded-For 是客户端可填的，
+    # 所以它只能当兜底 —— 这个 IP 是用户用来确认「是不是我这台手机」的依据，不能被伪造。
+    cf = re.search(rb"\r\nCF-Connecting-IP: *([^\r\n]+)", headers, re.I)
+    if cf:
+        ip = cf.group(1).decode("latin-1").strip()
     if not ip:
-        cf = re.search(rb"\r\nCF-Connecting-IP: *([^\r\n]+)", headers, re.I)
-        ip = cf.group(1).decode("latin-1").strip() if cf else ""
+        real = re.search(rb"\r\nX-Forwarded-For: *([^\r\n]+)", headers, re.I)
+        if real:
+            ip = real.group(1).decode("latin-1").split(",")[0].strip()
     m = re.search(rb"\r\nUser-Agent: *([^\r\n]+)", headers, re.I)
     ua = m.group(1).decode("latin-1").strip() if m else ""
     return ip[:64], ua[:160]
