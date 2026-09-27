@@ -592,6 +592,11 @@ def _stop_tunnel() -> Dict[str, Any]:
 #
 # token 一次性：每次「生成配对链接」都是新 token，用过即废、10 分钟不批也废
 # （用户原话「每次 token 要变」）。
+#
+# 两种模式（用户原话「账号密码登陆模式 应该分开 独立扫码，这个二维码扫码强制账号登陆
+# 跟批准模式分开」）—— 模式写在状态文件里（服务端说了算，手机端改不了）：
+#   approve  = 批准模式：手机看等待页 → 电脑点「批准」→ 手机 claim 免密进
+#   password = 账号密码模式：手机直接看登录表单，输面板账号密码进，电脑端不参与
 # ---------------------------------------------------------------------------
 
 PAIR_PORT = 9121              # 反代只听 127.0.0.1，只有 cloudflared 连得到
@@ -619,10 +624,33 @@ def _pair_read() -> Dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _links(state: Dict[str, Any]) -> Dict[str, Any]:
+    """各模式一条链接：``state["links"][mode]``。
+
+    老的单条平格式（token 就在顶层）当场就折成嵌套的，就地改 ``state`` 再写盘，
+    所以「一个模式生成/批准」不会碰到另一个模式那条。用户要求的就是这个。
+    """
+    links = state.get("links")
+    if isinstance(links, dict):
+        return links
+    links = {}
+    if state.get("token"):
+        links[str(state.get("mode") or "approve")] = {k: v for k, v in state.items() if k != "links"}
+    state["links"] = links
+    return links
+
+
+def _pair_entry(state: Dict[str, Any], mode: str) -> Dict[str, Any]:
+    """某个模式那条链接（没有就返回空 dict，调用方不用到处判 None）。"""
+    entry = _links(state).get(mode)
+    return entry if isinstance(entry, dict) else {}
+
+
 def _pair_write(state: Dict[str, Any]) -> Dict[str, Any]:
     p = _pair_state_path()
     tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    # 只写 links：老平格式被 _links() 折过之后，平字段就别再写回去了。
+    tmp.write_text(json.dumps({"links": _links(state)}, ensure_ascii=False), encoding="utf-8")
     os.replace(tmp, p)
     return state
 
@@ -672,40 +700,62 @@ def _start_pair_proxy(port: int) -> None:
         raise HTTPException(500, detail="配对反代没起来，看日志：%s" % log)
 
 
-def _pair_snapshot() -> Dict[str, Any]:
-    state = _pair_read()
-    now = time.time()
-    token = str(state.get("token") or "")
-    status = str(state.get("status") or "") if token else "none"
-    if token and status in ("pending", "approved") and float(state.get("expires") or 0) <= now:
+PAIR_MODES = ("approve", "password")
+PAIR_MODE_CN = {"approve": "批准模式", "password": "账号密码模式"}
+
+
+def _link_snapshot(state: Dict[str, Any], mode: str) -> Dict[str, Any]:
+    """一条链接的状态快照。``_token`` 只给调用方拼 url 用，出接口前 pop 掉。"""
+    entry = _pair_entry(state, mode)
+    token = str(entry.get("token") or "")
+    status = str(entry.get("status") or "") if token else "none"
+    if token and status in ("pending", "approved") and float(entry.get("expires") or 0) <= time.time():
         status = "expired"
     return {
         "status": status,
+        "mode": mode,
         "token_tail": ("…" + token[-4:]) if token else "",
-        "ip": str(state.get("ip") or ""),
-        "ua": str(state.get("ua") or ""),
-        "created": float(state.get("created") or 0.0),
-        "expires_at": float(state.get("expires") or 0.0),
-        "approved_at": float(state.get("approved_at") or 0.0),
+        "ip": str(entry.get("ip") or ""),
+        "ua": str(entry.get("ua") or ""),
+        "created": float(entry.get("created") or 0.0),
+        "expires_at": float(entry.get("expires") or 0.0),
+        "approved_at": float(entry.get("approved_at") or 0.0),
+        "_token": token,
     }
+
+
+def _pair_links(tunnel: str) -> Dict[str, Any]:
+    """两个模式各一份：各带自己的 url/状态，互不影响。"""
+    state = _pair_read()
+    out: Dict[str, Any] = {}
+    for mode in PAIR_MODES:
+        snap = _link_snapshot(state, mode)
+        token = snap.pop("_token")
+        snap["url"] = ("%s/pair?t=%s" % (tunnel.rstrip("/"), token)
+                       if token and snap["status"] in ("pending", "approved") and tunnel else "")
+        out[mode] = snap
+    return out
 
 
 class PairBody(BaseModel):
     action: str = "new"
+    mode: str = "approve"      # approve（批准模式）| password（账号密码模式）
 
 
 @router.get("/pair")
 def pair_status() -> Dict[str, Any]:
     snap = _tunnel_snapshot()
-    out = _pair_snapshot()
     tunnel = str(snap.get("url") or "")
-    out.update(ok=True, proxy=bool(_pair_alive()), port=PAIR_PORT, ttl_seconds=PAIR_TTL_SECONDS,
-               tunnel=tunnel, tunnel_running=bool(snap.get("running")), log=str(_pair_log_path()))
-    if out["status"] in ("pending", "approved") and tunnel:
-        out["url"] = "%s/pair?t=%s" % (tunnel.rstrip("/"), _pair_read().get("token", ""))
-    else:
-        out["url"] = ""
-    return out
+    return {
+        "ok": True,
+        "proxy": bool(_pair_alive()),
+        "port": PAIR_PORT,
+        "ttl_seconds": PAIR_TTL_SECONDS,
+        "tunnel": tunnel,
+        "tunnel_running": bool(snap.get("running")),
+        "log": str(_pair_log_path()),
+        "links": _pair_links(tunnel),
+    }
 
 
 @router.post("/pair")
@@ -715,27 +765,34 @@ def pair(body: PairBody) -> Dict[str, Any]:
     from hermes_cli.config import load_config  # noqa: PLC0415
 
     action = (body.action or "new").strip().lower()
+    mode = "password" if (body.mode or "").strip().lower() == "password" else "approve"
+    state = _pair_read()
+    entry = _pair_entry(state, mode)   # 只碰这个模式那条：另一个模式还开着就还开着
+
     if action in ("approve", "deny", "cancel"):
-        state = _pair_read()
-        if not state.get("token"):
-            raise HTTPException(400, detail="没有等着的配对请求：先点「生成配对链接」")
+        if not entry.get("token"):
+            raise HTTPException(400, detail="「%s」还没生成链接：先点它自己的「生成」" % PAIR_MODE_CN[mode])
         if action != "approve":
             # deny 保留 token：手机那边要看到「已被拒绝」，而不是「链接失效」。
             # 状态不是 pending 就签不出 cookie（反代只在 approved 时签发），留着没风险。
-            state.update(status="denied" if action == "deny" else "none")
+            entry.update(status="denied" if action == "deny" else "none")
             if action != "deny":
-                state.pop("token", None)   # cancel：面板自己收尾，链接立刻作废
+                entry.pop("token", None)   # cancel：面板自己收尾，链接立刻作废
             _pair_write(state)
-            return {"ok": True, "status": state["status"]}
-        if float(state.get("expires") or 0) <= time.time():
+            return {"ok": True, "mode": mode, "status": entry["status"]}
+        if float(entry.get("expires") or 0) <= time.time():
             raise HTTPException(400, detail="这个配对链接已经过期了，重新生成一个")
-        if state.get("status") != "pending":
+        if entry.get("status") != "pending":
             raise HTTPException(400, detail="这个配对链接已经用过了，重新生成一个")
-        state.update(status="approved", approved_at=time.time(), expires=time.time() + PAIR_APPROVE_WINDOW)
+        if mode == "password":
+            raise HTTPException(400, detail="这是「账号密码模式」的链接：手机自己输账号密码进，不用在这里批准")
+        entry.update(status="approved", approved_at=time.time(), expires=time.time() + PAIR_APPROVE_WINDOW)
         _pair_write(state)
-        return {"ok": True, **{k: v for k, v in _pair_snapshot().items()}}
+        out = pair_status()
+        out["ok"] = True
+        return out
 
-    # action == new（默认）：一次一个 token，旧的立刻作废
+    # action == new（默认）：只换这个模式的链接，另一个模式那条原封不动
     config = load_config() or {}
     basic = _basic_auth(config)
     if not str(basic.get("password_hash") or basic.get("password") or "").strip():
@@ -750,14 +807,21 @@ def pair(body: PairBody) -> Dict[str, Any]:
     snap = _tunnel_snapshot()
     tunnel = str(snap.get("url") or "")
     token = _secrets.token_urlsafe(24)
-    _pair_write({"token": token, "status": "pending", "created": time.time(),
-                 "expires": time.time() + PAIR_TTL_SECONDS, "ip": "", "ua": "", "tunnel": tunnel})
-    out = _pair_snapshot()
+    now = time.time()
+    _links(state)[mode] = {"token": token, "status": "pending", "created": now,
+                           "expires": now + PAIR_TTL_SECONDS, "ip": "", "ua": "", "tunnel": tunnel,
+                           "mode": mode}
+    _pair_write(state)
+    out = pair_status()
     out.update(ok=True, proxy=True, port=PAIR_PORT, ttl_seconds=PAIR_TTL_SECONDS,
                tunnel=tunnel, tunnel_running=bool(snap.get("running")))
-    out["url"] = "%s/pair?t=%s" % (tunnel.rstrip("/"), token) if tunnel else ""
-    out["note"] = ("公网隧道没开：开了隧道手机才打得开这个链接" if not tunnel
-                   else "手机扫码/打开链接 → 在这台电脑上点「批准」→ 手机自动进去，不用输密码")
+    out.update(out["links"][mode])       # 前端只看这一条（扁平字段留着，省得改一堆读法）
+    if not tunnel:
+        out["note"] = "公网隧道没开：开了隧道手机才打得开这个链接"
+    elif mode == "password":
+        out["note"] = "账号密码模式：手机扫码后直接输面板账号密码进，不用在这台电脑上点批准"
+    else:
+        out["note"] = "批准模式：手机扫码后在这台电脑上点「批准」，手机自动进去，不用输密码"
     return out
 
 

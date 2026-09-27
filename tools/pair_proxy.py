@@ -8,20 +8,37 @@
 
 职责
 ----
-``/pair?t=TOKEN``      等待批准页（手机打开）
-``/pair/state?t=TOKEN`` 轮询状态 JSON
-``/pair/claim?t=TOKEN`` 批准后签发官方 session cookie 并 302 进主页（一次性）
+``/pair?t=TOKEN``      手机落地页，按配对的 ``mode`` 分岔：
+                       - ``approve``（批准模式）：等待批准页，轮询状态
+                       - ``password``（账号密码模式）：登录表单，强制输面板账号密码
+``/pair/state?t=TOKEN`` 轮询状态 JSON（批准模式用）
+``/pair/claim?t=TOKEN`` 批准后签发官方 session cookie 并 302 进主页（一次性，仅批准模式）
+``/pair/login``        账号密码模式的登录提交（POST 表单）→ 验过即签 cookie 302 进去
 其它一切               只有带有效面板 session cookie 的请求才透传（chunked / SSE /
                        WebSocket 不受影响）；没 cookie 的一律 403
 
-安全模型（对齐用户红线「不要永久不变 安全性要高」「每次 token 要变」）
-------------------------------------------------------------------
-* token 32 字符随机，每次生成都覆盖旧的（生成即失效），默认 10 分钟有效
-* 必须电脑端点「批准」才签发 cookie；claim 一次即焚
+两种模式为什么要拆开（用户要求）：批准模式 = 电脑点一下、手机免密；账号密码模式 = 电脑
+不用管、手机必须自己输账号密码。模式是**服务端状态**（写进 ``pair.json``），手机端改不了，
+所以「账号密码模式的二维码强制走账号登录」是强制的；两种模式各自独立生成、独立扫码。
+
+安全模型（对齐用户红线「不要永久不变 安全性要高」「每次 token 要变」「只有批准的设备才可以」）
+--------------------------------------------------------------------------------
+* token 32 字符随机，每次生成都覆盖旧的（生成即失效），默认 10 分钟有效；模式与它无关
+* 批准模式下必须电脑端点「批准」才签发 cookie；claim 一次即焚
+* 账号密码模式复用官方 ``BasicAuthProvider.complete_password_login()`` 验密码（scrypt +
+  定长比较），同一 CF-Connecting-IP 10 分钟内错 5 次 → 429（官方 auth 插件没有挂点做限速，
+  我们自己的表单有，顺手补上）
 * cookie 值用官方 ``BasicAuthProvider`` 签发（同一 HMAC secret），因此官方 auth 认它
 * **未批准设备拿不到面板的任何东西**：隧道域名不是面板的第二个入口 —— 没有有效 session
   cookie 的请求（含 ``/login``、``/auth/*``）在这里就 403，登录页只存在于局域网面板上
 * 只监听 127.0.0.1；对外只有 cloudflared 隧道能碰到它
+
+手机会话与配对 token 解耦（「token 十分钟一变，扫码那台设备要长期稳定」）
+----------------------------------------------------------------------
+配对成功后手机拿的是官方 session cookie：access 12h、refresh 30 天且**滑动续期**（面板每次
+续签重算 30 天）。token 轮换、隧道断开重开、面板重写 ``pair.json`` 都不动老 cookie 的合法性
+（同一个 secret），所以手机不用重新扫；接入时 access 过期了也没事 —— 门禁认 refresh，透传上去
+面板自己续签。唯一会把手机踢掉的是**改面板密码/secret**（签名 key 变了）。
 
 跑法：``python pair_proxy.py``；环境变量 ``HPR_PORT`` / ``HPR_UPSTREAM`` / ``HPR_STATE``。
 """
@@ -66,6 +83,21 @@ def _write_state(data: dict) -> None:
     tmp = STATE_PATH.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     os.replace(tmp, STATE_PATH)
+
+
+def _link(state: dict, token: str) -> dict:
+    """这个 token 属于哪条链接：新格式 ``state["links"]``，老的单条平格式就直接是 state。
+
+    返回的是 state 里的同一个对象，改它再 `_write_state(state)` 就落盘了（两种模式各一条，
+    互不干扰 —— 用户要求「批准版和密码版分开生成」）。找不到就返回空 dict。
+    """
+    links = state.get("links")
+    if not isinstance(links, dict):
+        return state
+    for entry in links.values():
+        if isinstance(entry, dict) and entry.get("token") and hmac.compare_digest(str(entry["token"]), token):
+            return entry
+    return {}
 
 
 def _token_status(state: dict, token: str) -> str:
@@ -221,6 +253,79 @@ p{color:#9aa3b2;font-size:14px;margin:8px 0 0}</style><div class="card"><div sty
 <h1>链接已失效</h1><p>配对链接是一次性的，过期或用过就作废。请在电脑上重新生成。</p></div></html>""").encode("utf-8")
 
 
+# ---------------------------------------------------------------- 手机页面（账号密码模式）
+_LOGIN_PAGE = """<!doctype html><html lang="zh"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>登录 Hermes</title><style>
+*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;
+background:#111318;color:#e8e8ea;font:16px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif}
+.card{width:100%;max-width:380px;padding:26px 22px;background:#1a1d24;border:1px solid #2a2f3a;border-radius:18px}
+h1{margin:0;font-size:19px;font-weight:600;text-align:center}
+p{margin:8px 0 0;color:#9aa3b2;font-size:13px;text-align:center}
+label{display:block;margin:16px 0 6px;color:#9aa3b2;font-size:13px}
+input{width:100%;padding:12px;font-size:16px;color:#e8e8ea;background:#111318;border:1px solid #2a2f3a;border-radius:10px}
+button{width:100%;margin-top:22px;padding:13px;font-size:16px;font-weight:600;color:#fff;background:#5b67ca;border:0;border-radius:10px}
+.err{margin:14px 0 0;color:#ff8a8a}
+.addr{margin-top:18px;color:#6b7484;font:12px ui-monospace,SFMono-Regular,monospace;word-break:break-all}
+</style><form class="card" method="post" action="/pair/login">
+<input type="hidden" name="t" value="__TOKEN__">
+<h1>登录 Hermes</h1><p>这台手机要进的面板：</p><p class="addr">__ADDR__</p>
+<label for="hp-u">账号</label>
+<input id="hp-u" name="username" autocomplete="username" autocapitalize="off" spellcheck="false" required>
+<label for="hp-p">密码</label>
+<input id="hp-p" name="password" type="password" autocomplete="current-password" required>
+__ERR__
+<button type="submit">登录</button></form></html>"""
+
+
+def _login_page(token: str, host: str, err: str = "") -> bytes:
+    """账号密码模式的登录页。token/Host/错误文案都是外部输入，落 HTML 前收敛。"""
+    tok = token if _SAFE_TOKEN.fullmatch(token) else ""
+    return (_LOGIN_PAGE.replace("__TOKEN__", html.escape(tok, quote=True))
+                      .replace("__ADDR__", html.escape(host[:120], quote=True))
+                      .replace("__ERR__", f'<p class="err">{html.escape(err[:120])}</p>' if err else "")
+           ).encode("utf-8")
+
+
+# 登录失败限速（官方 auth 插件没有挂点，我们自己这张表单有 —— 顺便补上）：
+# 按 CF-Connecting-IP 计数，10 分钟错 5 次就 429。进程内内存计数，重启即清。
+LOGIN_MAX_FAILS = int(os.environ.get("HPR_LOGIN_MAX_FAILS") or 5)
+LOGIN_FAIL_WINDOW = float(os.environ.get("HPR_LOGIN_FAIL_WINDOW") or 600)
+_login_fails: dict[str, list[float]] = {}
+
+
+def _login_blocked(ip: str) -> bool:
+    now = time.time()
+    hits = [t for t in _login_fails.get(ip or "-", []) if now - t < LOGIN_FAIL_WINDOW]
+    _login_fails[ip or "-"] = hits
+    return len(hits) >= LOGIN_MAX_FAILS
+
+
+def _login_failed(ip: str) -> None:
+    _login_fails.setdefault(ip or "-", []).append(time.time())
+
+
+def _body_of(conn: socket.socket, head: bytes, rest: bytes) -> bytes:
+    """把请求体读全（只有登录表单走这里，上限 4 KiB）。"""
+    m = re.search(rb"\r\nContent-Length: *(\d+)", head, re.I)
+    want = min(int(m.group(1)), 4096) if m else 0
+    while len(rest) < want:
+        try:
+            chunk = conn.recv(4096)
+        except OSError:
+            break
+        if not chunk:
+            break
+        rest += chunk
+    return rest[:want]
+
+
+def _host_of(headers: bytes) -> str:
+    if b"\r\nHost: " not in headers:
+        return ""
+    return headers.split(b"\r\nHost: ")[-1].split(b"\r\n")[0].decode("latin-1")
+
+
 # ---------------------------------------------------------------- HTTP 小工具
 def _respond(conn: socket.socket, status: str, body: bytes, *,
              ctype: str = "", extra: list[tuple[str, str]] | None = None) -> None:
@@ -237,25 +342,30 @@ def _json(conn: socket.socket, obj: dict) -> None:
     _respond(conn, "200 OK", json.dumps(obj).encode(), ctype="application/json")
 
 
-def _serve_pair(conn: socket.socket, target: str, headers: bytes) -> None:
+def _serve_pair(conn: socket.socket, target: str, headers: bytes, body: bytes = b"") -> None:
     url = urlsplit(target)
     path = url.path.rstrip("/") or "/pair"
     query = parse_qs(url.query)
     token = (query.get("t") or [""])[0]
+    host = _host_of(headers)
+    if path == "/pair/login":
+        return _serve_login(conn, token, headers, body)
     with _lock:
         state = _read_state()
-        status = _token_status(state, token)
+        entry = _link(state, token)
+        mode = str(entry.get("mode") or "approve")
+        status = _token_status(entry, token)
         if status == "pending" and path in ("/pair", "/pair/state"):
             ip, ua = _client_of(headers)
             # 只在拿到值时更新：手机页轮询/其他客户端可能不带 UA，别把已记下的覆盖成空。
-            if ip and state.get("ip") != ip:
-                state["ip"] = ip
-            if ua and state.get("ua") != ua:
-                state["ip"], state["ua"] = ip, ua
-            state["seen"] = time.time()
+            if ip and entry.get("ip") != ip:
+                entry["ip"] = ip
+            if ua and entry.get("ua") != ua:
+                entry["ip"], entry["ua"] = ip, ua
+            entry["seen"] = time.time()
             _write_state(state)
         elif status == "approved" and path == "/pair/state":
-            state["seen"] = time.time()
+            entry["seen"] = time.time()
             _write_state(state)
 
     if path == "/pair/state":
@@ -263,7 +373,7 @@ def _serve_pair(conn: socket.socket, target: str, headers: bytes) -> None:
     if path == "/pair/claim":
         if status != "approved":
             return _respond(conn, "200 OK", _INVALID_PAGE, ctype="text/html; charset=utf-8")
-        if time.time() - float(state.get("approved_at") or 0) > CLAIM_TTL:
+        if time.time() - float(entry.get("approved_at") or 0) > CLAIM_TTL:
             return _respond(conn, "200 OK", _INVALID_PAGE, ctype="text/html; charset=utf-8")
         try:
             cookies = _mint_set_cookie_headers()
@@ -271,21 +381,85 @@ def _serve_pair(conn: socket.socket, target: str, headers: bytes) -> None:
             msg = f"签发失败：{exc}".encode()
             return _respond(conn, "500 Internal Server Error", msg, ctype="text/plain; charset=utf-8")
         with _lock:
-            state = _read_state()
+            fresh = _read_state()
             # 保留 token 字段（本机文件，下一次生成就覆盖），只把状态置 claimed ——
             # 手机再刷新看到「链接已失效」，面板能显示「已使用」。
-            state.update(status="claimed", claimed_at=time.time())
-            _write_state(state)
+            _link(fresh, token).update(status="claimed", claimed_at=time.time())
+            _write_state(fresh)
         return _respond(conn, "302 Found", b"", extra=[("Location", "/"), *cookies])
     if path == "/pair":
+        if mode == "password":
+            # 账号密码模式：二维码/链接直接落在登录表单上，电脑端不参与（用户要求强制账号登录）
+            if status == "pending":
+                return _respond(conn, "200 OK", _login_page(token, host), ctype="text/html; charset=utf-8")
+            return _respond(conn, "200 OK", _INVALID_PAGE, ctype="text/html; charset=utf-8")
         # denied 也要把页面给出去：手机那边由页面 JS 显示「已被拒绝」，
         # 直接抛失效页会让用户以为是链接坏了。
         if status in ("pending", "approved", "denied"):
-            host = (headers.split(b"\r\nHost: ")[-1].split(b"\r\n")[0].decode("latin-1")
-                    if b"\r\nHost: " in headers else "")
             return _respond(conn, "200 OK", _page(token, host), ctype="text/html; charset=utf-8")
         return _respond(conn, "200 OK", _INVALID_PAGE, ctype="text/html; charset=utf-8")
     _respond(conn, "404 Not Found", b"not found", ctype="text/plain; charset=utf-8")
+
+
+def _login_and_mint(username: str, password: str) -> list[tuple[str, str]]:
+    """验面板账号密码，过了就签一份和批准模式同款的 session cookie。
+
+    校验交给官方 ``complete_password_login``（scrypt + 定长比较 + 不泄露账号是否存在），
+    不自己碰密码 hash。cookie 走 ``_mint_set_cookie_headers``，和批准模式同一条路。
+    """
+    built = _provider()
+    if built is None:
+        raise RuntimeError("面板还没设账号密码")
+    provider, _secret = built
+    provider.complete_password_login(username=username, password=password)
+    return _mint_set_cookie_headers()
+
+
+def _serve_login(conn: socket.socket, token: str, headers: bytes, body: bytes) -> None:
+    """账号密码模式的 /pair/login：GET/空表单出登录页，POST 验密码过了直接进面板。
+
+    浏览器 form 提交不会带 ``?t=``，token 在表单体里，所以先读体再定 token。
+    """
+    host = _host_of(headers)
+    body = _body_of(conn, headers, body)
+    form = {k: v[0] for k, v in parse_qs(body.decode("utf-8", "replace")).items()}
+    token = token or str(form.get("t") or "")
+    with _lock:
+        state = _read_state()
+        entry = _link(state, token)
+        mode = str(entry.get("mode") or "approve")
+        status = _token_status(entry, token)
+        if status == "pending":
+            ip, ua = _client_of(headers)
+            if ip:
+                entry["ip"] = ip
+            if ua:
+                entry["ua"] = ua
+            entry["seen"] = time.time()
+            _write_state(state)
+
+    # 模式不对（这个 token 是批准模式的）或链接作废：给失效页，不泄露任何信息
+    if mode != "password" or status != "pending":
+        return _respond(conn, "200 OK", _INVALID_PAGE, ctype="text/html; charset=utf-8")
+    if not form.get("username") and not form.get("password"):
+        return _respond(conn, "200 OK", _login_page(token, host), ctype="text/html; charset=utf-8")
+
+    ip, _ua = _client_of(headers)
+    if _login_blocked(ip):
+        return _respond(conn, "429 Too Many Requests",
+                        _login_page(token, host, "错误次数太多，过 10 分钟再试"),
+                        ctype="text/html; charset=utf-8")
+    try:
+        cookies = _login_and_mint(str(form.get("username") or ""), str(form.get("password") or ""))
+    except Exception:  # noqa: BLE001 — 失败理由统一成一句话，别提示账号存不存在
+        _login_failed(ip)
+        return _respond(conn, "200 OK", _login_page(token, host, "账号或密码不对"),
+                        ctype="text/html; charset=utf-8")
+    with _lock:
+        fresh = _read_state()
+        _link(fresh, token).update(status="claimed", claimed_at=time.time(), claimed_by="password")
+        _write_state(fresh)
+    return _respond(conn, "302 Found", b"", extra=[("Location", "/"), *cookies])
 
 
 def _client_of(headers: bytes) -> tuple[str, str]:
@@ -370,7 +544,7 @@ def _handle(conn: socket.socket) -> None:
         # 认路径要同时吃「源站式 /pair/...」和「绝对式 https://host/pair/...」：cloudflared
         # 会发绝对式，漏认就被当普通请求透传给面板 → 手机轮询拿到 302/登录页 → 永远等批准。
         if urlsplit(parts[1]).path.rstrip("/").split("/")[1:2] == ["pair"]:
-            return _serve_pair(conn, parts[1], head)
+            return _serve_pair(conn, parts[1], head, rest)
         # 门禁：隧道域名对未批准设备什么都不是 —— 面板、登录页、静态资源一并拦在这里。
         if not _approved_device(head):
             return _respond(conn, "403 Forbidden", b"forbidden: this device is not paired",

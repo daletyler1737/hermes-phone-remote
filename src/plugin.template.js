@@ -421,16 +421,155 @@ function PhonePage({ ctx }) {
   const [tun, setTun] = useState({ phase: 'loading' })    // 公网隧道状态
   const [tunArm, setTunArm] = useState(false)              // 「开启公网链接」的两段式批准
   const [pair, setPair] = useState({ phase: 'loading', busy: false })   // 扫码配对：每次新 token，用一次作废
-  const [pwFallback, setPwFallback] = useState(false)   // ponytail: 互联网模式下二维码/账号密码那块默认收起，主路径是扫码配对；老浏览器扫不了码时才展开
+  // 账号密码模式那张卡自己的二维码就是登录页（见 pairCard('password')），不用再单开一块
 
-  const doPair = async action => {
-    setPair(p => ({ ...p, busy: true }))
+  // 两种模式各一张卡：各自生成、各自一个二维码，点一个另一个不动。
+  // 模式名只从参数来（不信后端返回的），批准按钮永远是批准这条链接。
+  const pairCard = m => {
+    const L = (pair.links && pair.links[m]) || {}
+    const pw = m === 'password'
+    const sub =
+      pair.phase === 'loading'
+        ? '正在读取…'
+        : pair.phase === 'error'
+          ? '读取失败'
+          : L.status === 'pending'
+            ? L.ua
+              ? pw
+                ? '手机已打开，正在输账号密码'
+                : '手机已打开，等你批准'
+              : '等待手机打开链接…'
+            : L.status === 'approved'
+              ? '已批准，手机正在进入…'
+              : L.status === 'expired'
+                ? '上一个链接已过期'
+                : L.status === 'denied'
+                  ? '已拒绝'
+                  : L.status === 'claimed'
+                    ? '已使用，那台手机已经进去了'
+                    : '还没有链接'
+    return jsxs('div', {
+      style: S.card,
+      children: [
+        jsxs('div', {
+          style: S.row,
+          children: [
+            jsx('span', { style: S.cardTitle, children: pw ? '手机连接 · 账号密码' : '手机连接 · 免密配对' }),
+            jsx('span', { style: S.sub, children: sub })
+          ]
+        }),
+        L.url
+          ? jsxs('div', {
+              style: S.row,
+              children: [
+                jsx(QrImage, { text: L.url, size: 160 }),
+                jsxs('div', {
+                  style: S.col,
+                  children: [
+                    jsx(Button, {
+                      variant: 'ghost',
+                      size: 'sm',
+                      onClick: async () => {
+                        const ok = await os.copy(L.url)
+                        os.notify(ok ? '已复制配对链接' : '复制失败，请用手机扫二维码', ok ? 'info' : 'warn')
+                      },
+                      children: '复制链接'
+                    }),
+                    jsx('span', {
+                      style: S.sub,
+                      children:
+                        '用一次就作废' +
+                        (L.expires_at
+                          ? '，到 ' + new Date(L.expires_at * 1000).toTimeString().slice(0, 5) + ' 还没用也失效'
+                          : '')
+                    }),
+                    L.status === 'pending' && (L.ip || L.ua)
+                      ? jsx('span', {
+                          style: S.sub,
+                          children: '来自 ' + (L.ip || '手机') + (L.ua ? ' · ' + String(L.ua).slice(0, 44) : '')
+                        })
+                      : null,
+                    jsxs('div', {
+                      style: S.row,
+                      children: pw
+                        ? [
+                            jsx(Button, {
+                              variant: 'outline',
+                              size: 'sm',
+                              disabled: !!pair.busy,
+                              onClick: () => doPair('new', 'password'),
+                              children: '换一个新链接'
+                            })
+                          ]
+                        : [
+                            jsx(Button, {
+                              variant: 'default',
+                              size: 'sm',
+                              disabled: !!pair.busy || L.status !== 'pending',
+                              onClick: () => doPair('approve', 'approve'),
+                              children: L.status === 'approved' ? '已批准' : '批准此手机'
+                            }),
+                            jsx(Button, {
+                              variant: 'ghost',
+                              size: 'sm',
+                              disabled: !!pair.busy || L.status !== 'pending',
+                              onClick: () => doPair('deny', 'approve'),
+                              children: '拒绝'
+                            }),
+                            jsx(Button, {
+                              variant: 'outline',
+                              size: 'sm',
+                              disabled: !!pair.busy,
+                              onClick: () => doPair('new', 'approve'),
+                              children: '换一个新链接'
+                            })
+                          ]
+                    }),
+                    jsx('span', {
+                      style: S.sub,
+                      children: pw
+                        ? '账号密码模式：手机自己输账号密码，电脑这边不用点批准。链接泄漏也只是多一个人看到登录页，没密码进不来。'
+                        : '密码不用给手机：链接泄漏也只是多一个「待批准」的请求，你不点批准就进不来。'
+                    })
+                  ]
+                })
+              ]
+            })
+          : jsxs('div', {
+              style: S.col,
+              children: [
+                jsx(Button, {
+                  variant: pw ? 'outline' : 'secondary',
+                  size: 'sm',
+                  disabled: !!pair.busy || !tunUrl,
+                  onClick: () => doPair('new', m),
+                  children: pair.busy === m ? '生成中…' : pw ? '生成账号密码链接（手机自己输密码）' : '生成批准链接（电脑点批准）'
+                }),
+                jsx('span', {
+                  style: S.sub,
+                  children: tunUrl
+                    ? pw
+                      ? '手机扫码 → 落到登录页 → 自己输账号密码'
+                      : '手机扫码 → 在这台电脑点「批准」→ 手机自动进去'
+                    : '先点上面的「开启公网链接」，配对链接才有公网地址'
+                })
+              ]
+            })
+      ]
+    })
+  }
+
+  const doPair = async (action, m) => {
+    const md = m || 'approve'
+    setPair(p => ({ ...p, busy: md }))
     try {
-      const res = await rest('/pair', { method: 'POST', body: { action } })
-      setPair({ phase: 'ready', busy: false, ...(res || {}) })
+      const res = await rest('/pair', { method: 'POST', body: { action, mode: md } })
+      setPair(prev => ({ ...prev, ...(res || {}), phase: 'ready', busy: false }))
       os.notify(
         action === 'new'
-          ? '配对链接已生成：10 分钟内有效，用一次就作废'
+          ? md === 'password'
+            ? '账号密码链接已生成：手机扫码后自己输账号密码进来'
+            : '批准链接已生成：10 分钟内有效，用一次就作废'
           : action === 'approve'
             ? '已批准这台手机，它正在进入'
             : '已拒绝这台手机',
@@ -463,6 +602,10 @@ function PhonePage({ ctx }) {
   }, [mode])
 
   const [ttlMin, setTtlMin] = useState(120)                // 开多久（分钟）
+
+  // ponytail: 账号密码链接现在有自己的卡（pairCard('password')），这块只剩局域网模式的登录二维码在用；
+  // 这里只保留 pwUrl 这个名字，谁再想用别处别踩空。
+  const pwUrl = ((pair.links || {}).password || {}).url || ''
 
 
   const link = 'http://' + cfg.ip + ':' + cfg.port + '/'
@@ -805,152 +948,24 @@ function PhonePage({ ctx }) {
 
       mode === 'net'
         ? jsxs('div', {
-            style: S.card,
-            children: [
-              jsxs('div', {
-                style: S.row,
-                children: [
-                  jsx('span', { style: S.cardTitle, children: '手机连接 · 免密配对' }),
-                  jsx('span', {
-                    style: S.sub,
-                    children:
-                      pair.phase === 'loading'
-                        ? '正在读取…'
-                        : pair.phase === 'error'
-                          ? '读取失败'
-                          : pair.status === 'pending'
-                            ? pair.ua
-                              ? '手机已打开，等你批准'
-                              : '等待手机打开链接…'
-                            : pair.status === 'approved'
-                              ? '已批准，手机正在进入…'
-                              : pair.status === 'expired'
-                                ? '上一个链接已过期'
-                                : pair.status === 'denied'
-                                  ? '已拒绝'
-                                  : '没有等着的配对'
-                  })
-                ]
-              }),
-              pair.url
-                ? jsxs('div', {
-                    style: S.row,
-                    children: [
-                      jsx(QrImage, { text: pair.url, size: 160 }),
-                      jsxs('div', {
-                        style: S.col,
-                        children: [
-                          // ponytail: 地址不再第三遍印在卡片里，这里只给「复制链接」
-                          jsx(Button, {
-                            variant: 'ghost',
-                            size: 'sm',
-                            onClick: async () => {
-                              const ok = await os.copy(pair.url)
-                              os.notify(ok ? '已复制配对链接' : '复制失败，请用手机扫二维码', ok ? 'info' : 'warn')
-                            },
-                            children: '复制链接'
-                          }),
-                          jsx('span', {
-                            style: S.sub,
-                            children:
-                              '用一次就作废' +
-                              (pair.expires_at
-                                ? '，到 ' +
-                                  new Date(pair.expires_at * 1000).toTimeString().slice(0, 5) +
-                                  ' 还没批也失效'
-                                : '')
-                          }),
-                          pair.status === 'pending' && (pair.ip || pair.ua)
-                            ? jsx('span', {
-                                style: S.sub,
-                                children:
-                                  '来自 ' +
-                                  (pair.ip || '手机') +
-                                  (pair.ua ? ' · ' + String(pair.ua).slice(0, 44) : '')
-                              })
-                            : null,
-                          jsxs('div', {
-                            style: S.row,
-                            children: [
-                              jsx(Button, {
-                                variant: 'default',
-                                size: 'sm',
-                                disabled: pair.busy || pair.status !== 'pending',
-                                onClick: () => doPair('approve'),
-                                children: pair.status === 'approved' ? '已批准' : '批准此手机'
-                              }),
-                              jsx(Button, {
-                                variant: 'ghost',
-                                size: 'sm',
-                                disabled: pair.busy,
-                                onClick: () => doPair('deny'),
-                                children: '拒绝'
-                              }),
-                              jsx(Button, {
-                                variant: 'outline',
-                                size: 'sm',
-                                disabled: pair.busy,
-                                onClick: () => doPair('new'),
-                                children: '换一个新链接'
-                              })
-                            ]
-                          }),
-                          jsx('span', {
-                            style: S.sub,
-                            children:
-                              '密码不用给手机：链接泄漏也只是多一个「待批准」的请求，你不点批准就进不来。'
-                          })
-                        ]
-                      })
-                    ]
-                  })
-                : jsxs('div', {
-                    style: S.row,
-                    children: [
-                      jsx(Button, {
-                        variant: 'secondary',
-                        size: 'sm',
-                        disabled: pair.busy || !tunUrl,
-                        onClick: () => doPair('new'),
-                        children: pair.busy ? '生成中…' : '生成配对链接'
-                      }),
-                      jsx('span', {
-                        style: S.sub,
-                        children: tunUrl
-                          ? '链接只活 10 分钟，用过 / 过期都得重新生成'
-                          : '先点上面的「开启公网链接」，配对链接才有公网地址'
-                      })
-                    ]
-                  }),
-              pair.phase === 'error' ? jsx('div', { style: S.warnMsg, children: pair.error }) : null
-            ]
+            style: S.col,
+            children: [pairCard('approve'), pairCard('password')]
           })
         : null,
 
-      mode === 'net' && !pwFallback
-        ? jsx('div', {
-            style: S.card2,
-            children: jsx(Button, {
-              variant: 'ghost',
-              size: 'sm',
-              onClick: () => setPwFallback(true),
-              children: '▸ 手机浏览器扫不了码？改用账号密码登录'
-            })
-          })
+      mode === 'net'
+        ? null
         : jsxs('div', {
         style: S.card,
         children: [
-          mode === 'net'
-            ? jsx(Button, {
-                variant: 'ghost',
-                size: 'sm',
-                onClick: () => setPwFallback(false),
-                children: '▾ 收起账号密码登录'
+        style: S.card,
+        children: [
+          mode === 'net' && !pwUrl
+            ? jsx('span', {
+                style: S.sub,
+                children: '先在上面点「生成账号密码链接（手机自己输密码）」，这里会变成登录页的二维码'
               })
-            : null,
-          mode === 'net' && !tunUrl
-            ? jsx('span', { style: S.sub, children: '先点上面的「开启公网链接」，这里会变成公网地址的二维码' })
-            : jsx(QrImage, { text: mode === 'net' ? tunUrl : link, size: 224 }),
+            : jsx(QrImage, { text: mode === 'net' ? pwUrl : link, size: 224 }),
           jsxs('div', {
             style: S.col,
             children: [
@@ -960,7 +975,7 @@ function PhonePage({ ctx }) {
                   jsx('li', {
                     children:
                       mode === 'net'
-                        ? '手机（4G/5G 也行）扫左边的码，或直接打开下面的地址'
+                        ? '手机（4G/5G 也行）扫左边的码，直接落到登录页；也可手动打开下面的地址'
                         : '手机相机 / 微信「扫一扫」对准左边的二维码'
                   }),
                   jsx('li', { children: '首次打开输入下面这组账号密码，勾选「记住我」' }),
@@ -970,11 +985,11 @@ function PhonePage({ ctx }) {
               jsx(Separator, {}),
               jsx(Field, {
                 label: '地址',
-                value: mode === 'net' ? tunUrl || '（还没开启公网链接）' : link,
+                value: mode === 'net' ? pwUrl || '（先点「生成账号密码链接」）' : link,
                 onCopy: async () => {
-                  const target = mode === 'net' ? tunUrl : link
+                  const target = mode === 'net' ? pwUrl : link
                   if (!target) {
-                    os.notify('先在上面点「开启公网链接」', 'warn')
+                    os.notify('先在上面点「生成账号密码链接」', 'warn')
                     return
                   }
                   const ok = await os.copy(target)
