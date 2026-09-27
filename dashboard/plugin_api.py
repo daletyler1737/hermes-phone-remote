@@ -672,24 +672,27 @@ def _pair_log_path() -> Path:
     return _pair_dir() / "pair-proxy.log"
 
 
-def _pair_proxy_ver() -> float:
-    """问一句已经在跑的反代：你跑的是哪版脚本（mtime）。问不到 = 0。"""
+def _pair_proxy_probe() -> dict:
+    """问一句已经在跑的反代：你跑的是哪版脚本、签发模块在不在。问不到 = {}。"""
     import urllib.request  # ponytail: 只有这一处要 HTTP，local import 不动文件头
     try:
         with urllib.request.urlopen("http://127.0.0.1:%d/pair/_ver" % PAIR_PORT, timeout=2.0) as resp:
-            return float(json.loads(resp.read().decode("utf-8")).get("mtime") or 0.0)
+            data = json.loads(resp.read().decode("utf-8"))
+            return data if isinstance(data, dict) else {}
     except Exception:
-        return 0.0
+        return {}
 
 
 def _pair_proxy_current() -> bool:
-    """在跑的反代和磁盘上的脚本是不是同一版（mtime 相等）。"""
+    """在跑的反代是不是「同一版脚本 + 签发模块齐」。版本或依赖不对就换掉它——
+    否则手机端会在批准那一步看到「签发失败」。"""
     try:
         want = os.path.getmtime(_pair_script())
     except OSError:
         return False
-    have = _pair_proxy_ver()
-    return bool(have) and abs(have - want) < 1e-6
+    info = _pair_proxy_probe()
+    have = float(info.get("mtime") or 0.0)
+    return bool(info.get("deps")) and abs(have - want) < 1e-6
 
 
 def _port_pid(port: int) -> int:

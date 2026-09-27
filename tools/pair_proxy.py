@@ -145,7 +145,21 @@ def _provider():
                              secret=secret, ttl_seconds=ttl), secret
 
 
-def _mint_set_cookie_headers() -> list[tuple[str, str]]:
+def _is_https(headers: bytes) -> bool:
+    """这条请求是不是走的 HTTPS。
+
+    隧道（cloudflared）会带 ``X-Forwarded-Proto: https``；直连局域网是明文 http。这个值必须
+    跟着请求走：``__Host-`` 前缀的 cookie 带 Secure，浏览器在 http 上会直接丢掉 —— 批准了
+    却进不去面板（403 not paired）就是这么来的。
+    """
+    m = re.search(rb"\r\nx-forwarded-proto: *([A-Za-z]+)", headers, re.I)
+    if m and m.group(1).lower() == b"https":
+        return True
+    m = re.search(rb"\r\nx-forwarded-ssl: *([A-Za-z]+)", headers, re.I)
+    return bool(m and m.group(1).lower() == b"on")
+
+
+def _mint_set_cookie_headers(use_https: bool = True) -> list[tuple[str, str]]:
     """用官方 BasicAuthProvider 签一个合法 session，返回 Set-Cookie 头。
 
     复用官方模块（而不是自己拼 payload）——cookie 名带 ``__Host-`` 前缀、属性、HMAC
@@ -163,7 +177,7 @@ def _mint_set_cookie_headers() -> list[tuple[str, str]]:
     resp = Response()
     set_session_cookies(resp, access_token=session.access_token,
                         refresh_token=session.refresh_token,
-                        access_token_expires_in=ttl, use_https=True, provider=provider.name)
+                        access_token_expires_in=ttl, use_https=use_https, provider=provider.name)
     return [(k.decode(), v.decode()) for k, v in resp.raw_headers
             if k.decode().lower() == "set-cookie"]
 
@@ -350,8 +364,15 @@ def _serve_pair(conn: socket.socket, target: str, headers: bytes, body: bytes = 
     token = (query.get("t") or [""])[0]
     host = _host_of(headers)
     if path == "/pair/_ver":
-        # 面板启动/开隧道时问一句进程版本：mtime 对不上就换掉它。无秘密。
-        return _json(conn, {"mtime": _CODE_MTIME, "pid": os.getpid()})
+        # 面板启动/开隧道时问一句进程版本：mtime 对不上、或签发模块导不进来（跑错解释器），
+        # 面板就换掉这个进程。无秘密。
+        try:
+            import fastapi.responses  # noqa: F401,PLC0415
+            from hermes_cli.dashboard_auth.cookies import set_session_cookies  # noqa: F401,PLC0415
+            deps = True
+        except Exception:
+            deps = False
+        return _json(conn, {"mtime": _CODE_MTIME, "pid": os.getpid(), "deps": deps})
     if path == "/pair/login":
         return _serve_login(conn, token, headers, body)
     with _lock:
@@ -380,7 +401,7 @@ def _serve_pair(conn: socket.socket, target: str, headers: bytes, body: bytes = 
         if time.time() - float(entry.get("approved_at") or 0) > CLAIM_TTL:
             return _respond(conn, "200 OK", _INVALID_PAGE, ctype="text/html; charset=utf-8")
         try:
-            cookies = _mint_set_cookie_headers()
+            cookies = _mint_set_cookie_headers(_is_https(headers))
         except Exception as exc:  # noqa: BLE001 — 面板没配密码等，直说
             msg = f"签发失败：{exc}".encode()
             return _respond(conn, "500 Internal Server Error", msg, ctype="text/plain; charset=utf-8")
@@ -405,7 +426,7 @@ def _serve_pair(conn: socket.socket, target: str, headers: bytes, body: bytes = 
     _respond(conn, "404 Not Found", b"not found", ctype="text/plain; charset=utf-8")
 
 
-def _login_and_mint(username: str, password: str) -> list[tuple[str, str]]:
+def _login_and_mint(username: str, password: str, use_https: bool = True) -> list[tuple[str, str]]:
     """验面板账号密码，过了就签一份和批准模式同款的 session cookie。
 
     校验交给官方 ``complete_password_login``（scrypt + 定长比较 + 不泄露账号是否存在），
@@ -416,7 +437,7 @@ def _login_and_mint(username: str, password: str) -> list[tuple[str, str]]:
         raise RuntimeError("面板还没设账号密码")
     provider, _secret = built
     provider.complete_password_login(username=username, password=password)
-    return _mint_set_cookie_headers()
+    return _mint_set_cookie_headers(use_https)
 
 
 def _serve_login(conn: socket.socket, token: str, headers: bytes, body: bytes) -> None:
@@ -454,7 +475,8 @@ def _serve_login(conn: socket.socket, token: str, headers: bytes, body: bytes) -
                         _login_page(token, host, "错误次数太多，过 10 分钟再试"),
                         ctype="text/html; charset=utf-8")
     try:
-        cookies = _login_and_mint(str(form.get("username") or ""), str(form.get("password") or ""))
+        cookies = _login_and_mint(str(form.get("username") or ""), str(form.get("password") or ""),
+                                  _is_https(headers))
     except Exception:  # noqa: BLE001 — 失败理由统一成一句话，别提示账号存不存在
         _login_failed(ip)
         return _respond(conn, "200 OK", _login_page(token, host, "账号或密码不对"),
