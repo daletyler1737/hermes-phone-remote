@@ -66,6 +66,7 @@ HERMES_HOME = Path(os.environ.get("HERMES_HOME") or (Path.home() / "AppData" / "
 HERMES_AGENT = Path(os.environ.get("HERMES_AGENT_DIR") or (HERMES_HOME / "hermes-agent"))
 STATE_PATH = Path(os.environ.get("HPR_STATE") or (HERMES_HOME / "phone-remote" / "pair.json"))
 _lock = threading.Lock()
+_CODE_MTIME = os.path.getmtime(__file__)   # ponytail: 面板靠它认出「端口上那个进程跑的是哪版脚本」（改了代码没重起的坑）
 
 # ---------------------------------------------------------------- 状态文件
 # 面板（另一个进程）和本反代共享同一份小 json：面板写 approved/denied，这里读。
@@ -348,6 +349,9 @@ def _serve_pair(conn: socket.socket, target: str, headers: bytes, body: bytes = 
     query = parse_qs(url.query)
     token = (query.get("t") or [""])[0]
     host = _host_of(headers)
+    if path == "/pair/_ver":
+        # 面板启动/开隧道时问一句进程版本：mtime 对不上就换掉它。无秘密。
+        return _json(conn, {"mtime": _CODE_MTIME, "pid": os.getpid()})
     if path == "/pair/login":
         return _serve_login(conn, token, headers, body)
     with _lock:

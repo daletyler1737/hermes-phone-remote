@@ -672,14 +672,74 @@ def _pair_log_path() -> Path:
     return _pair_dir() / "pair-proxy.log"
 
 
+def _pair_proxy_ver() -> float:
+    """问一句已经在跑的反代：你跑的是哪版脚本（mtime）。问不到 = 0。"""
+    import urllib.request  # ponytail: 只有这一处要 HTTP，local import 不动文件头
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:%d/pair/_ver" % PAIR_PORT, timeout=2.0) as resp:
+            return float(json.loads(resp.read().decode("utf-8")).get("mtime") or 0.0)
+    except Exception:
+        return 0.0
+
+
+def _pair_proxy_current() -> bool:
+    """在跑的反代和磁盘上的脚本是不是同一版（mtime 相等）。"""
+    try:
+        want = os.path.getmtime(_pair_script())
+    except OSError:
+        return False
+    have = _pair_proxy_ver()
+    return bool(have) and abs(have - want) < 1e-6
+
+
+def _port_pid(port: int) -> int:
+    """监听这个端口的进程 pid（Windows 走 netstat，其他平台走 lsof）。找不到返回 0。"""
+    try:
+        if os.name == "nt":
+            out = subprocess.run(["netstat", "-ano", "-p", "TCP"], capture_output=True,
+                                 text=True, timeout=10).stdout
+            for line in out.splitlines():
+                parts = line.split()
+                if len(parts) >= 5 and parts[3] == "LISTENING" and parts[1].endswith(":%d" % port):
+                    return int(parts[4])
+        else:
+            out = subprocess.run(["lsof", "-ti", "tcp:%d" % port, "-sTCP:LISTEN"], capture_output=True,
+                                 text=True, timeout=10).stdout
+            return int(out.split()[0]) if out.split() else 0
+    except Exception:
+        pass
+    return 0
+
+
+def _kill_stale_pair_proxy() -> None:
+    """端口被占但版本对不上（改了 pair_proxy.py 没重起）→ 干掉它，等端口空出来。
+
+    ponytail: 端口是插件自己选的（PAIR_PORT），上面本来就假定是我们的反代；pid 落在面板日志里备查。
+    """
+    pid = _port_pid(PAIR_PORT)
+    if pid:
+        try:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True, timeout=10)
+            else:
+                os.kill(pid, signal.SIGTERM)
+        except Exception:
+            pass
+    deadline = time.time() + 5.0
+    while time.time() < deadline and _port_open(PAIR_PORT):
+        time.sleep(0.25)
+
+
 def _start_pair_proxy(port: int) -> None:
     """起配对反代；已经在跑（或端口已有人听）就不动它。"""
     proc = _PAIR.get("proc")
     if proc is not None and proc.poll() is None:
         return
     if _port_open(PAIR_PORT):
-        _PAIR["proc"] = None
-        return
+        if _pair_proxy_current():
+            _PAIR["proc"] = None
+            return
+        _kill_stale_pair_proxy()   # 旧代码反代：手机扫码会一直「链接已失效」，换掉
     log = _pair_log_path()
     log.parent.mkdir(parents=True, exist_ok=True)
     flags = 0
