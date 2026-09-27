@@ -695,22 +695,16 @@ def _pair_proxy_current() -> bool:
 
 
 def _port_pid(port: int) -> int:
-    """监听这个端口的进程 pid（Windows 走 netstat，其他平台走 lsof）。找不到返回 0。"""
+    """监听这个端口的进程 pid（走 _listeners：先 PowerShell 再 netstat/lsof）。找不到返回 0。
+
+    ponytail: 原来只解析 netstat 文本，本机上会静默返回 0（找不到就当端口空着），
+    于是「旧反代进程没清掉」这类坑会悄悄复活。统一走 _listeners。
+    """
     try:
-        if os.name == "nt":
-            out = subprocess.run(["netstat", "-ano", "-p", "TCP"], capture_output=True,
-                                 text=True, timeout=10, creationflags=_NO_WIN).stdout
-            for line in out.splitlines():
-                parts = line.split()
-                if len(parts) >= 5 and parts[3] == "LISTENING" and parts[1].endswith(":%d" % port):
-                    return int(parts[4])
-        else:
-            out = subprocess.run(["lsof", "-ti", "tcp:%d" % port, "-sTCP:LISTEN"], capture_output=True,
-                                 text=True, timeout=10, creationflags=_NO_WIN).stdout
-            return int(out.split()[0]) if out.split() else 0
+        pids = _listeners(port)
+        return pids[0] if pids else 0
     except Exception:
-        pass
-    return 0
+        return 0
 
 
 def _kill_stale_pair_proxy() -> None:
