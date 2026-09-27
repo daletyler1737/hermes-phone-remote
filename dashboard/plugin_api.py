@@ -116,10 +116,16 @@ def _hermes_exe() -> str:
     raise HTTPException(500, detail="找不到 hermes 可执行文件，无法重启面板")
 
 
+# 面板是 GUI 进程，没有控制台：子进程一律 CREATE_NO_WINDOW，否则每次 PowerShell/netstat
+# 都会在屏幕上闪一个黑窗（状态轮询时会反复闪）。ponytail: 一个常量够用，不包 helper。
+_NO_WIN = int(getattr(subprocess, "CREATE_NO_WINDOW", 0)) if os.name == "nt" else 0
+
+
 def _run(cmd: List[str], timeout: float = 25.0) -> str:
     """跑命令取输出；text=True 在 Windows 上遇到不可解码输出会给 None，统一兜成空串。"""
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=timeout)
+        proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=timeout,
+                              creationflags=_NO_WIN)
         return proc.stdout or ""
     except (OSError, subprocess.SubprocessError):
         return ""
@@ -147,14 +153,7 @@ def _listeners(port: int) -> List[int]:
         return sorted(set(pids))
     out = _run(["lsof", "-nP", "-iTCP:%d" % port, "-sTCP:LISTEN", "-t"])
     return sorted({int(x) for x in out.split() if x.strip().isdigit()})
-    try:
-        out = subprocess.run(
-            ["lsof", "-nP", "-iTCP:%d" % port, "-sTCP:LISTEN", "-t"],
-            capture_output=True, text=True, timeout=20,
-        ).stdout
-        return [int(x) for x in out.split() if x.strip().isdigit()]
-    except (OSError, subprocess.SubprocessError):
-        return pids
+
 
 
 def _kill(pid: int) -> bool:
@@ -165,7 +164,7 @@ def _kill(pid: int) -> bool:
             # 不用 taskkill：参数经 MSYS/编码层容易被吃掉，实机踩过。PowerShell 按 PID 停最稳。
             subprocess.run(
                 ["powershell", "-NoProfile", "-Command", "Stop-Process -Id %d -Force" % pid],
-                capture_output=True, timeout=25,
+                capture_output=True, timeout=25, creationflags=_NO_WIN,
             )
         else:
             os.kill(pid, signal.SIGTERM)
@@ -700,14 +699,14 @@ def _port_pid(port: int) -> int:
     try:
         if os.name == "nt":
             out = subprocess.run(["netstat", "-ano", "-p", "TCP"], capture_output=True,
-                                 text=True, timeout=10).stdout
+                                 text=True, timeout=10, creationflags=_NO_WIN).stdout
             for line in out.splitlines():
                 parts = line.split()
                 if len(parts) >= 5 and parts[3] == "LISTENING" and parts[1].endswith(":%d" % port):
                     return int(parts[4])
         else:
             out = subprocess.run(["lsof", "-ti", "tcp:%d" % port, "-sTCP:LISTEN"], capture_output=True,
-                                 text=True, timeout=10).stdout
+                                 text=True, timeout=10, creationflags=_NO_WIN).stdout
             return int(out.split()[0]) if out.split() else 0
     except Exception:
         pass
@@ -723,7 +722,8 @@ def _kill_stale_pair_proxy() -> None:
     if pid:
         try:
             if os.name == "nt":
-                subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True, timeout=10)
+                subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True, timeout=10,
+                               creationflags=_NO_WIN)
             else:
                 os.kill(pid, signal.SIGTERM)
         except Exception:

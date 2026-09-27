@@ -3436,9 +3436,7 @@ function PhonePage({ ctx }) {
           jsxs('span', {
             children: [
               jsx('b', { children: '状态是「未检测到」？' }),
-              ' 说明后台服务没在跑 —— 点上面「启动服务」拉起来（等价于双击 ',
-              jsx('code', { children: '启动手机网页-Start-Phone-Web.bat' }),
-              ' 即可（监听 0.0.0.0:',
+              ' 说明后台服务没在跑 —— 点上面「启动服务」拉起来（',
               cfg.port,
               '）。'
             ]

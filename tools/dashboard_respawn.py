@@ -22,6 +22,9 @@ import argparse
 import os
 import socket
 import subprocess
+
+# 面板没有控制台：子进程一律不弹窗（GUI 父进程下 PowerShell/netstat 会闪黑窗）。
+_NO_WIN = int(getattr(subprocess, "CREATE_NO_WINDOW", 0)) if os.name == "nt" else 0
 import sys
 import time
 from pathlib import Path
@@ -61,7 +64,7 @@ def _kill(pid: int) -> bool:
         if os.name == "nt":
             subprocess.run(["powershell", "-NoProfile", "-Command",
                             "Stop-Process -Id %d -Force" % pid],
-                           capture_output=True, timeout=25)
+                           capture_output=True, timeout=25, creationflags=_NO_WIN)
         else:
             os.kill(pid, 15)
         return True
@@ -76,7 +79,7 @@ def _listeners(port: int) -> list[int]:
             out = subprocess.run(
                 ["powershell", "-NoProfile", "-Command",
                  "(Get-NetTCPConnection -LocalPort %d -State Listen -ErrorAction SilentlyContinue).OwningProcess" % port],
-                capture_output=True, text=True, timeout=25).stdout
+                capture_output=True, text=True, timeout=25, creationflags=_NO_WIN).stdout
             pids = sorted({int(x) for x in out.split() if x.strip().isdigit()})
             if pids:
                 return pids
@@ -84,7 +87,7 @@ def _listeners(port: int) -> list[int]:
             pass
         try:
             out = subprocess.run(["netstat", "-ano", "-p", "TCP"], capture_output=True, text=True,
-                                 timeout=25).stdout
+                                 timeout=25, creationflags=_NO_WIN).stdout
         except (OSError, subprocess.SubprocessError):
             return []
         pids = []
