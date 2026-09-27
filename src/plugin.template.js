@@ -912,7 +912,7 @@ function PhonePage({ ctx }) {
                     children:
                       '到 ' +
                       new Date(tun.expires_at * 1000).toTimeString().slice(0, 5) +
-                      ' 自动关闭 —— 忘了关是这类公网地址最大的风险，默认 2 小时，不够就在下面选更长。'
+                      ' 自动关闭 —— 忘了关是这类公网地址最大的风险，觉得短就在下面选更长。'
                   })
                 : null,
               jsx('div', {
