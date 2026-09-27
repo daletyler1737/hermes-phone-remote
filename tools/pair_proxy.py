@@ -289,6 +289,19 @@ def _pump(a: socket.socket, b: socket.socket) -> None:
     other.join(timeout=10)
 
 
+def _one_shot(head: bytes) -> bytes:
+    """透传请求改成 Connection: close（Upgrade 请求不动，WebSocket 要它）。
+
+    踩过：透传是裸字节管道，上游若保持 keep-alive，这条连接就被"钉"在面板上 ——
+    cloudflared 复用同一条连接再发 /pair* 时不再经过上面的路由（裸转发），手机配对页
+    就永远停在「等待批准」。一次性用完就关，下个请求必然重新进来过路由。
+    """
+    if re.search(rb"\r\nupgrade:", head, re.I):
+        return head
+    keep = [ln for ln in head.split(b"\r\n") if not re.match(rb"(proxy-)?connection:", ln, re.I)]
+    return b"\r\n".join(keep + [b"Connection: close"])
+
+
 def _handle(conn: socket.socket) -> None:
     up = None
     try:
@@ -306,11 +319,13 @@ def _handle(conn: socket.socket) -> None:
         parts = line.split(" ")
         if len(parts) < 2:
             return
-        if parts[1].split("?")[0].split("/")[1:2] == ["pair"]:
+        # 认路径要同时吃「源站式 /pair/...」和「绝对式 https://host/pair/...」：cloudflared
+        # 会发绝对式，漏认就被当普通请求透传给面板 → 手机轮询拿到 302/登录页 → 永远等批准。
+        if urlsplit(parts[1]).path.rstrip("/").split("/")[1:2] == ["pair"]:
             return _serve_pair(conn, parts[1], head)
         up = socket.create_connection(UPSTREAM, timeout=10)
         up.settimeout(None)   # 建连超时用完就撤，别让 10s 读超时把长连接掐了
-        up.sendall(head + b"\r\n\r\n" + rest)
+        up.sendall(_one_shot(head) + b"\r\n\r\n" + rest)
         conn.settimeout(None)
         _pump(conn, up)
     except (OSError, ValueError):
