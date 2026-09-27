@@ -94,12 +94,15 @@ def _wait_port(p: int, t: float = 5.0) -> None:
     raise AssertionError("反代没起来")
 
 
-def talk(req: bytes, timeout: float = 3.0) -> bytes:
+def talk(req: bytes, timeout: float = 3.0, cookie: bytes | None = None) -> bytes:
     """一个连接发一个请求，读到 EOF/超时为止。"""
     s = socket.create_connection(("127.0.0.1", proxy_port), timeout=5)
     s.settimeout(timeout)
     try:
-        s.sendall(req + b"\r\nHost: h.example\r\n\r\n")
+        head = req + b"\r\nHost: h.example"
+        if cookie:
+            head += b"\r\nCookie: " + cookie
+        s.sendall(head + b"\r\n\r\n")
         buf = b""
         while True:
             ch = s.recv(65536)
@@ -116,6 +119,29 @@ def talk(req: bytes, timeout: float = 3.0) -> bytes:
 _wait_port(proxy_port)
 time.sleep(0.2)
 
+
+# --- 门禁用的假 provider：真 provider 要读面板 config（测试里没有），只验签发逻辑 ---
+class _Session:
+    pass
+
+
+class _FakeProvider:
+    name = "basic"
+    _ttl = 43200
+    _username = "demo"
+
+    def verify_session(self, *, access_token):
+        return _Session() if access_token == "GOODACCESS" else None
+
+    def refresh_session(self, *, refresh_token):
+        if refresh_token != "GOODREFRESH":
+            raise RuntimeError("bad refresh token")
+        return _Session()
+
+
+m._provider = lambda: (_FakeProvider(), b"x" * 32)
+GOOD = b"__Host-hermes_session=GOODACCESS"
+
 # 1) 绝对式请求行必须被认成 /pair（cloudflared 就这么发）
 got = talk(b"GET https://x.trycloudflare.com/pair/state?t=" + TOK.encode() + b" HTTP/1.1")
 assert b'"pending"' in got and b"UPSTREAM" not in got, got[:140]
@@ -126,7 +152,7 @@ assert b'"pending"' in got, got[:140]
 
 # 3) 透传请求要被改成 Connection: close（否则连接被 keep-alive 钉住，路由被绕开）
 seen_heads.clear()
-got = talk(b"GET /no-such-page HTTP/1.1")
+got = talk(b"GET /no-such-page HTTP/1.1", cookie=GOOD)
 assert b"UPSTREAM" in got, got[:80]
 assert seen_heads, "上游没收到透传请求"
 assert b"connection: close" in seen_heads[0].lower(), seen_heads[0][:200]
@@ -136,7 +162,7 @@ s = socket.create_connection(("127.0.0.1", proxy_port), timeout=5)
 s.settimeout(3)
 first = b""
 try:
-    s.sendall(b"GET /no-such-page HTTP/1.1\r\nHost: h\r\n\r\n")
+    s.sendall(b"GET /no-such-page HTTP/1.1\r\nHost: h\r\nCookie: " + GOOD + b"\r\n\r\n")
     while True:
         ch = s.recv(65536)
         if not ch:
@@ -166,5 +192,31 @@ assert b"Upgrade: websocket" in up_head and b"close" not in up_head.lower(), up_
 h2 = m._one_shot(b"GET / HTTP/1.1\r\nHost: h\r\nProxy-Connection: keep-alive")
 assert h2.lower().endswith(b"connection: close") and b"keep-alive" not in h2.lower(), h2
 
+# 7) 门禁：没 cookie 的普通请求 → 403，且上游一次都没被碰（不许把登录页透出去）
+seen_heads.clear()
+got = talk(b"GET /login HTTP/1.1")
+assert got.startswith(b"HTTP/1.1 403"), got[:140]
+assert b"UPSTREAM" not in got and not seen_heads, (got[:140], seen_heads[:1])
+
+# 8) 伪造 / 过期的 cookie → 同样 403
+got = talk(b"GET / HTTP/1.1", cookie=b"__Host-hermes_session=fake-token")
+assert got.startswith(b"HTTP/1.1 403") and b"UPSTREAM" not in got, got[:140]
+
+# 9) 有效 access cookie → 透传（这才是「已批准设备」）
+got = talk(b"GET /no-such-page HTTP/1.1", cookie=GOOD)
+assert b"UPSTREAM" in got, got[:140]
+
+# 10) refresh cookie 也放行（access 到期后手机带着 refresh 过来，面板自己续签）
+got = talk(b"GET /no-such-page HTTP/1.1", cookie=b"__Host-hermes_refresh=GOODREFRESH")
+assert b"UPSTREAM" in got, got[:140]
+
+# 11) cookie 里混着别的键、还有没有 = 的段，也要能挑出对的那个
+got = talk(b"GET /no-such-page HTTP/1.1", cookie=b"theme=dark; junk; " + GOOD)
+assert b"UPSTREAM" in got, got[:140]
+
+# 12) 门禁不碰 /pair*：没 cookie 也能打开配对页（否则手机连扫码页都进不去）
+good_page = talk(b"GET /pair?t=" + TOK.encode() + b" HTTP/1.1")
+assert b"HTTP/1.1 200" in good_page[:20] and b"UPSTREAM" not in good_page, good_page[:140]
+
 stop.set()
-print("ok: 配对反代路由回归 6 项通过")
+print("ok: 配对反代路由/门禁回归 12 项通过")

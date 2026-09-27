@@ -4,20 +4,23 @@
 为什么需要它：Hermes 官方 dashboard 的 auth gate 拦下所有插件路由（公开白名单只有
 ``/login``、``/auth/*``、几个静态目录），公网隧道域名下没有一个"任何人都能打开"的页面
 能给手机种登录 cookie。所以「扫码 → 电脑批准 → 手机免密进去」这件事只能自己做一层：
-本进程只接管 ``/pair*``，其余请求原样 TCP 透传给 dashboard。
+本进程接管 ``/pair*``；其余请求只有**已批准设备**才透传到 dashboard，其它一律 403。
 
 职责
 ----
 ``/pair?t=TOKEN``      等待批准页（手机打开）
 ``/pair/state?t=TOKEN`` 轮询状态 JSON
 ``/pair/claim?t=TOKEN`` 批准后签发官方 session cookie 并 302 进主页（一次性）
-其它一切               原样透传（chunked / SSE / WebSocket 都不受影响）
+其它一切               只有带有效面板 session cookie 的请求才透传（chunked / SSE /
+                       WebSocket 不受影响）；没 cookie 的一律 403
 
 安全模型（对齐用户红线「不要永久不变 安全性要高」「每次 token 要变」）
 ------------------------------------------------------------------
 * token 32 字符随机，每次生成都覆盖旧的（生成即失效），默认 10 分钟有效
 * 必须电脑端点「批准」才签发 cookie；claim 一次即焚
 * cookie 值用官方 ``BasicAuthProvider`` 签发（同一 HMAC secret），因此官方 auth 认它
+* **未批准设备拿不到面板的任何东西**：隧道域名不是面板的第二个入口 —— 没有有效 session
+  cookie 的请求（含 ``/login``、``/auth/*``）在这里就 403，登录页只存在于局域网面板上
 * 只监听 127.0.0.1；对外只有 cloudflared 隧道能碰到它
 
 跑法：``python pair_proxy.py``；环境变量 ``HPR_PORT`` / ``HPR_UPSTREAM`` / ``HPR_STATE``。
@@ -76,19 +79,18 @@ def _token_status(state: dict, token: str) -> str:
 
 
 # ---------------------------------------------------------------- 签发官方 session
-def _mint_set_cookie_headers() -> list[tuple[str, str]]:
-    """用官方 BasicAuthProvider 签一个合法 session，返回 Set-Cookie 头。
+def _provider():
+    """按面板同一份配置造官方 provider，返回 ``(provider, secret)``；面板没设账号密码则 None。
 
-    复用官方模块（而不是自己拼 payload）——cookie 名带 ``__Host-`` 前缀、属性、HMAC
-    payload 格式全归官方管，升级跟着走，这里只负责取 secret 和调函数。
+    claim 的签发和门禁的校验共用这一份 —— 只有这里读 config，用户在面板里改了密码不需要
+    重启反代。ponytail: 每次调用都读一次 config.yaml（毫秒级，单用户面板够用）；真要压
+    这个开销就按 mtime 缓存。
     """
     if str(HERMES_AGENT) not in sys.path:
         sys.path.insert(0, str(HERMES_AGENT))
     import yaml  # noqa: PLC0415
     from plugins.dashboard_auth.basic import (  # noqa: PLC0415
         BasicAuthProvider, _resolve_secret, hash_password)
-    from fastapi.responses import Response  # noqa: PLC0415
-    from hermes_cli.dashboard_auth.cookies import set_session_cookies  # noqa: PLC0415
 
     env = os.environ.get
     cfg = yaml.safe_load((HERMES_HOME / "config.yaml").read_text(encoding="utf-8")) or {}
@@ -101,20 +103,66 @@ def _mint_set_cookie_headers() -> list[tuple[str, str]]:
         plain = env("HERMES_DASHBOARD_BASIC_AUTH_PASSWORD") or str(section.get("password") or "")
         password_hash = hash_password(plain) if plain else ""
     if not (username and password_hash and section.get("secret")):
-        raise RuntimeError("面板还没设账号密码（dashboard.basic_auth），先在面板里设一次再配对")
+        return None
     # 关键：config 里的 secret 是 base64，官方 _resolve_secret 解码后才当 HMAC key。
     # 直接拿字符串签名 → 官方验不过 → 401（踩过这个坑）。
     secret = _resolve_secret(section)
     ttl = int(str(section.get("session_ttl_seconds") or 43200) or 43200)
-    provider = BasicAuthProvider(username=username, password_hash=password_hash,
-                                 secret=secret, ttl_seconds=ttl)
-    session = provider._mint_session(username)  # noqa: SLF001 — 官方的签发入口就这一个
+    return BasicAuthProvider(username=username, password_hash=password_hash,
+                             secret=secret, ttl_seconds=ttl), secret
+
+
+def _mint_set_cookie_headers() -> list[tuple[str, str]]:
+    """用官方 BasicAuthProvider 签一个合法 session，返回 Set-Cookie 头。
+
+    复用官方模块（而不是自己拼 payload）——cookie 名带 ``__Host-`` 前缀、属性、HMAC
+    payload 格式全归官方管，升级跟着走，这里只负责取 secret 和调函数。
+    """
+    from fastapi.responses import Response  # noqa: PLC0415
+    from hermes_cli.dashboard_auth.cookies import set_session_cookies  # noqa: PLC0415
+
+    built = _provider()
+    if built is None:
+        raise RuntimeError("面板还没设账号密码（dashboard.basic_auth），先在面板里设一次再配对")
+    provider, _secret = built
+    ttl = provider._ttl       # noqa: SLF001 — 官方把 ttl 收在私有属性里，就这一个来源
+    session = provider._mint_session(provider._username)  # noqa: SLF001 — 官方签发入口
     resp = Response()
     set_session_cookies(resp, access_token=session.access_token,
                         refresh_token=session.refresh_token,
                         access_token_expires_in=ttl, use_https=True, provider=provider.name)
     return [(k.decode(), v.decode()) for k, v in resp.raw_headers
             if k.decode().lower() == "set-cookie"]
+
+
+def _approved_device(head: bytes) -> bool:
+    """这条请求带没带一个验得过的官方 session cookie（= 已批准设备）。
+
+    隧道域名不是「面板的第二个入口」：只有已批准设备的请求能透传到上游，其它一律 403 ——
+    未批准设备连登录页、/auth/* 都拿不到（用户红线：只有批准的设备才可以）。cookie 名不写死，
+    挨个值验签名，官方哪天改名这里也不用动。
+    """
+    m = re.search(rb"\r\ncookie: *([^\r\n]+)", head, re.I)
+    if not m:
+        return False
+    built = _provider()
+    if built is None:
+        return False          # 面板没配密码 → 门禁失败关闭，什么都不给
+    provider, _secret = built
+    for kv in m.group(1).decode("latin-1").split(";"):
+        if "=" not in kv:
+            continue
+        val = kv.split("=", 1)[1].strip()
+        if provider.verify_session(access_token=val):
+            return True
+        # refresh 也算「已批准设备」：access 到期后手机带着 refresh 过来，透传上去面板自己会
+        # 续签。官方 refresh_session 是无状态 _unsign+_mint（不轮换、不消耗），当纯校验用。
+        try:
+            provider.refresh_session(refresh_token=val)
+            return True
+        except Exception:  # noqa: BLE001 — 无效/过期/形状不对，都算没批准
+            continue
+    return False
 
 
 # ---------------------------------------------------------------- 手机页面
@@ -323,6 +371,10 @@ def _handle(conn: socket.socket) -> None:
         # 会发绝对式，漏认就被当普通请求透传给面板 → 手机轮询拿到 302/登录页 → 永远等批准。
         if urlsplit(parts[1]).path.rstrip("/").split("/")[1:2] == ["pair"]:
             return _serve_pair(conn, parts[1], head)
+        # 门禁：隧道域名对未批准设备什么都不是 —— 面板、登录页、静态资源一并拦在这里。
+        if not _approved_device(head):
+            return _respond(conn, "403 Forbidden", b"forbidden: this device is not paired",
+                            ctype="text/plain; charset=utf-8")
         up = socket.create_connection(UPSTREAM, timeout=10)
         up.settimeout(None)   # 建连超时用完就撤，别让 10s 读超时把长连接掐了
         up.sendall(_one_shot(head) + b"\r\n\r\n" + rest)
