@@ -32,6 +32,44 @@ def hermes_home() -> pathlib.Path:
     return pathlib.Path.home() / ".hermes"
 
 
+def check_module_syntax(code: str) -> None:
+    """语法闸门：桌面宿主是按 ES module 加载 plugin.js 的，必须用 module 模式解析。
+
+    坑：`node --check plugin.js` 会当**脚本**解析，坏文件能溜过去（实测漏掉过一整块
+    重复的 `style: S.card, children: [`），宿主却报 SyntaxError 整插件加载失败 ——
+    表现是左侧栏「连接手机」入口直接消失。所以这里一律走 .mjs 解析。
+    """
+    import tempfile
+
+    with tempfile.NamedTemporaryFile("w", suffix=".mjs", delete=False, encoding="utf-8", newline=LF) as fh:
+        fh.write(code)
+        tmp = fh.name
+    try:
+        r = subprocess.run(["node", "--check", tmp], capture_output=True, text=True)
+    finally:
+        pathlib.Path(tmp).unlink(missing_ok=True)
+    if r.returncode != 0:
+        raise SystemExit("语法不过（module 模式，与桌面宿主一致）:\n" + (r.stderr or r.stdout))
+
+
+def run_load_smoke() -> None:
+    """加载冒烟：拿替身 SDK 把 plugin.js 真跑一遍，确认三个入口都注册上。
+
+    语法过关 ≠ 能加载（register 里抛异常宿主一样丢弃整插件）。桌面日志里
+    `[plugins] runtime load failed (phone-remote)` 就是这个下场：左侧栏入口消失。
+    """
+    harness = HERE / "tests" / "plugin_load_smoke.mjs"
+    if not harness.exists():
+        print("! 没找到加载冒烟脚本，跳过: %s" % harness)
+        return
+    r = subprocess.run(["node", str(harness), str(OUT)], cwd=str(HERE), capture_output=True, text=True)
+    out = ((r.stdout or "") + (r.stderr or "")).strip()
+    for line in out.splitlines():
+        print("  " + line)
+    if r.returncode != 0:
+        raise SystemExit("加载冒烟没过 —— 别安装（宿主会把整插件丢掉，左侧栏入口会消失）")
+
+
 def build() -> str:
     tpl = TPL.read_text(encoding="utf-8")
     lib = LIB.read_text(encoding="utf-8")
@@ -40,6 +78,7 @@ def build() -> str:
     out = tpl.replace("/*__QR_INLINE__*/", lib)
     if not out.startswith("/**") or "export default" not in out:
         raise SystemExit("生成结果不像插件文件，已中止")
+    check_module_syntax(out)
     OUT.write_text(out, encoding="utf-8", newline=LF)
     return out
 
@@ -98,6 +137,8 @@ def main() -> None:
 
     out = build()
     print("构建完成: %s (%d bytes, LF)" % (OUT, len(out.encode("utf-8"))))
+    print("加载冒烟:")
+    run_load_smoke()
 
     if a.install:
         dest = hermes_home() / "desktop-plugins" / "phone-remote" / "plugin.js"

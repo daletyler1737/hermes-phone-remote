@@ -94,7 +94,7 @@ def _wait_port(p: int, t: float = 5.0) -> None:
     raise AssertionError("反代没起来")
 
 
-def talk(req: bytes, timeout: float = 3.0, cookie: bytes | None = None) -> bytes:
+def talk(req: bytes, timeout: float = 3.0, cookie: bytes | None = None, body: bytes = b"") -> bytes:
     """一个连接发一个请求，读到 EOF/超时为止。"""
     s = socket.create_connection(("127.0.0.1", proxy_port), timeout=5)
     s.settimeout(timeout)
@@ -102,7 +102,10 @@ def talk(req: bytes, timeout: float = 3.0, cookie: bytes | None = None) -> bytes
         head = req + b"\r\nHost: h.example"
         if cookie:
             head += b"\r\nCookie: " + cookie
-        s.sendall(head + b"\r\n\r\n")
+        if body:
+            head += (b"\r\nContent-Type: application/x-www-form-urlencoded"
+                     b"\r\nContent-Length: " + str(len(body)).encode())
+        s.sendall(head + b"\r\n\r\n" + body)
         buf = b""
         while True:
             ch = s.recv(65536)
@@ -137,6 +140,17 @@ class _FakeProvider:
         if refresh_token != "GOODREFRESH":
             raise RuntimeError("bad refresh token")
         return _Session()
+
+    def complete_password_login(self, *, username, password):
+        if username == "demo" and password == "PW-OK":
+            return _Session()
+        raise ValueError("bad credentials")
+
+    def _mint_session(self, username):
+        s = _Session()
+        s.access_token = "GOODACCESS"
+        s.refresh_token = "GOODREFRESH"
+        return s
 
 
 m._provider = lambda: (_FakeProvider(), b"x" * 32)
@@ -218,5 +232,64 @@ assert b"UPSTREAM" in got, got[:140]
 good_page = talk(b"GET /pair?t=" + TOK.encode() + b" HTTP/1.1")
 assert b"HTTP/1.1 200" in good_page[:20] and b"UPSTREAM" not in good_page, good_page[:140]
 
+# ---- 模式分离（用户要求：账号密码模式独立扫码、强制账号登录，与批准模式分开）----
+def set_state(mode: str, status: str = "pending") -> None:
+    tmp.write_text(json.dumps({"token": TOK, "status": status, "mode": mode, "created": time.time(),
+                               "expires": time.time() + 600}), encoding="utf-8")
+
+
+def state_now() -> dict:
+    return json.loads(tmp.read_text(encoding="utf-8"))
+
+
+# 13) 账号密码模式的二维码落地页 = 登录表单（不是等待批准页）
+m._login_fails.clear()
+set_state("password")
+page = talk(b"GET /pair?t=" + TOK.encode() + b" HTTP/1.1")
+assert b"HTTP/1.1 200" in page[:20] and b'action="/pair/login"' in page, page[:300]
+assert b'name="password"' in page and b"UPSTREAM" not in page, page[:300]
+
+# 14) 批准模式的二维码照旧是等待页，绝不出现密码输入框（两种模式各自扫码）
+set_state("approve")
+page = talk(b"GET /pair?t=" + TOK.encode() + b" HTTP/1.1")
+assert b"HTTP/1.1 200" in page[:20] and b'name="password"' not in page, page[:300]
+
+# 15) 密码错 → 回登录页 + 提示，不签发任何 cookie，链接仍可用
+m._login_fails.clear()
+set_state("password")
+got = talk(b"POST /pair/login HTTP/1.1",
+           body=b"t=" + TOK.encode() + b"&username=demo&password=nope")
+assert got.startswith(b"HTTP/1.1 200") and b"Set-Cookie" not in got, got[:200]
+assert state_now()["status"] == "pending", state_now()
+
+# 16) GET /pair/login 直接给表单（手机刷新/存书签都能回来）
+got = talk(b"GET /pair/login?t=" + TOK.encode() + b" HTTP/1.1")
+assert got.startswith(b"HTTP/1.1 200") and b'name="password"' in got, got[:200]
+
+# 17) 密码对 → 302 进面板 + 官方 session cookie，且 token 一次即焚
+got = talk(b"POST /pair/login HTTP/1.1",
+           body=b"t=" + TOK.encode() + b"&username=demo&password=PW-OK")
+assert got.startswith(b"HTTP/1.1 302") and b"Location: /" in got, got[:300]
+assert b"__Host-hermes_session_at=GOODACCESS" in got and b"__Host-hermes_session_rt=GOODREFRESH" in got, got[:400]
+assert state_now()["status"] == "claimed", state_now()
+again = talk(b"GET /pair?t=" + TOK.encode() + b" HTTP/1.1")
+assert b'name="password"' not in again, again[:200]
+
+# 18) 批准模式的 token 不许拿来走密码登录（二维码强制账号登录只对账号密码模式生效）
+m._login_fails.clear()
+set_state("approve")
+got = talk(b"POST /pair/login HTTP/1.1",
+           body=b"t=" + TOK.encode() + b"&username=demo&password=PW-OK")
+assert b"Set-Cookie" not in got and state_now()["status"] == "pending", got[:200]
+
+# 19) 密码错够次数 → 429（挡住拿登录页当爆破入口）
+m._login_fails.clear()
+set_state("password")
+last = b""
+for _ in range(6):
+    last = talk(b"POST /pair/login HTTP/1.1",
+                body=b"t=" + TOK.encode() + b"&username=demo&password=nope")
+assert last.startswith(b"HTTP/1.1 429"), last[:200]
+
 stop.set()
-print("ok: 配对反代路由/门禁回归 12 项通过")
+print("ok: 配对反代路由/门禁回归 19 项通过")

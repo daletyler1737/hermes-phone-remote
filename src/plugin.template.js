@@ -956,10 +956,8 @@ function PhonePage({ ctx }) {
       mode === 'net'
         ? null
         : jsxs('div', {
-        style: S.card,
-        children: [
-        style: S.card,
-        children: [
+            style: S.card,
+            children: [
           mode === 'net' && !pwUrl
             ? jsx('span', {
                 style: S.sub,
