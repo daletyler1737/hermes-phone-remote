@@ -96,8 +96,12 @@ def install_backend() -> None:
     tools_dest.mkdir(parents=True, exist_ok=True)
     (tools_dest / "pair_proxy.py").write_text(
         (HERE / "tools" / "pair_proxy.py").read_text(encoding="utf-8"), encoding="utf-8", newline=LF)
+    # 重启面板用的脱离助手：漏装它会留下会闪终端的旧版
+    (tools_dest / "dashboard_respawn.py").write_text(
+        (HERE / "tools" / "dashboard_respawn.py").read_text(encoding="utf-8"), encoding="utf-8", newline=LF)
     print("已安装后端: %s" % dest)
     print("已安装配对反代: %s" % (tools_dest / "pair_proxy.py"))
+    print("已安装重启助手: %s" % (tools_dest / "dashboard_respawn.py"))
 
 
 # 用户插件的 Python 后端只有进了 plugins.enabled 白名单才会被 dashboard 导入
