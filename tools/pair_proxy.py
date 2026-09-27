@@ -250,7 +250,7 @@ _INVALID_PAGE = ("""<!doctype html><html lang="zh"><meta charset="utf-8">
 font:16px/1.6 system-ui,sans-serif;padding:24px;text-align:center}.card{max-width:380px;background:#1a1d24;
 border:1px solid #2a2f3a;border-radius:18px;padding:26px 22px}h1{font-size:19px;margin:0 0 6px;color:#ff8a8a}
 p{color:#9aa3b2;font-size:14px;margin:8px 0 0}</style><div class="card"><div style="font-size:40px">⌛</div>
-<h1>链接已失效</h1><p>配对链接是一次性的，过期或用过就作废。请在电脑上重新生成。</p></div></html>""").encode("utf-8")
+<h1>链接已失效</h1><p>链接一次性：过期或用过就作废，请在电脑上重新生成。</p></div></html>""").encode("utf-8")
 
 
 # ---------------------------------------------------------------- 手机页面（账号密码模式）

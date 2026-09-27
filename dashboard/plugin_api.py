@@ -817,11 +817,11 @@ def pair(body: PairBody) -> Dict[str, Any]:
                tunnel=tunnel, tunnel_running=bool(snap.get("running")))
     out.update(out["links"][mode])       # 前端只看这一条（扁平字段留着，省得改一堆读法）
     if not tunnel:
-        out["note"] = "公网隧道没开：开了隧道手机才打得开这个链接"
+        out["note"] = "公网隧道没开"
     elif mode == "password":
-        out["note"] = "账号密码模式：手机扫码后直接输面板账号密码进，不用在这台电脑上点批准"
+        out["note"] = "账号密码模式：手机自己输密码"
     else:
-        out["note"] = "批准模式：手机扫码后在这台电脑上点「批准」，手机自动进去，不用输密码"
+        out["note"] = "批准模式：在这台电脑点「批准」"
     return out
 
 
