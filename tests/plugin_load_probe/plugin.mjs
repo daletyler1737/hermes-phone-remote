@@ -2751,7 +2751,7 @@ function PhonePage({ ctx }) {
         jsxs('div', {
           style: S.row,
           children: [
-            jsx('span', { style: S.cardTitle, children: pw ? '手机连接 · 账号密码' : '手机连接 · 免密配对' }),
+            jsx('span', { style: S.cardTitle, children: pw ? '账号密码' : '免密配对' }),
             jsx('span', { style: S.sub, children: sub })
           ]
         }),
@@ -2825,7 +2825,7 @@ function PhonePage({ ctx }) {
                     jsx('span', {
                       style: S.sub,
                       children: pw
-                        ? '账号密码模式：手机自己输账号密码，电脑这边不用点批准。链接泄漏也只是多一个人看到登录页，没密码进不来。'
+                        ? '手机自己输账号密码，电脑这边不用点批准；链接泄漏也只是多个人看到登录页。'
                         : '密码不用给手机：链接泄漏也只是多一个「待批准」的请求，你不点批准就进不来。'
                     })
                   ]
@@ -2840,15 +2840,15 @@ function PhonePage({ ctx }) {
                   size: 'sm',
                   disabled: !!pair.busy || !tunUrl,
                   onClick: () => doPair('new', m),
-                  children: pair.busy === m ? '生成中…' : pw ? '生成账号密码链接（手机自己输密码）' : '生成批准链接（电脑点批准）'
+                  children: pair.busy === m ? '生成中…' : pw ? '生成账号密码链接' : '生成批准链接'
                 }),
                 jsx('span', {
                   style: S.sub,
                   children: tunUrl
                     ? pw
-                      ? '手机扫码 → 落到登录页 → 自己输账号密码'
+                      ? '扫码 → 登录页 → 自己输账号密码'
                       : '手机扫码 → 在这台电脑点「批准」→ 手机自动进去'
-                    : '先点上面的「开启公网链接」，配对链接才有公网地址'
+                    : '先点「开启公网链接」，链接才有公网地址'
                 })
               ]
             })
@@ -3126,7 +3126,7 @@ function PhonePage({ ctx }) {
             children:
               mode === 'lan'
                 ? '手机和电脑连同一个 WiFi —— 最快、最稳'
-                : '手机用 4G/5G 或别的网也能连 —— 走 Cloudflare 临时公网地址'
+                : '手机用 4G/5G 也能连（Cloudflare 临时公网地址）'
           })
         ]
       }),
@@ -3195,7 +3195,7 @@ function PhonePage({ ctx }) {
                         style: S.sub,
                         children: tunArm
                           ? '确认后 Cloudflare 会分配一个公网地址 —— 谁拿到这个地址都能打开登录页'
-                          : '不开的时候，外网完全访问不到这台机器'
+                          : '不开：外网完全访问不到这台机器'
                       })
                     ]
                   }),
@@ -3223,13 +3223,13 @@ function PhonePage({ ctx }) {
                       jsx('option', { value: String(m), children: ttlOf(m) })
                     )
                   }),
-                  jsx('span', { style: S.sub, children: '到点自动断开（最长 72 小时，不给「永不」）' })
+                  jsx('span', { style: S.sub, children: '到点自动断开（最长 72 小时）' })
                 ]
               }),
               jsx('span', {
                 style: S.sub,
                 children:
-                  '地址是临时的：重启了 cloudflared（电脑重启、手动关掉）就会换新的，重开一次扫新码即可；只重启面板不影响它。登录用的还是上面这组账号密码。'
+                  '地址是临时的：cloudflared 一重启就换新地址（只重启面板不影响）。'
               }),
               tun.phase === 'error' ? jsx('div', { style: S.warnMsg, children: tun.error }) : null,
               tun.phase === 'error'
@@ -3258,7 +3258,7 @@ function PhonePage({ ctx }) {
           mode === 'net' && !pwUrl
             ? jsx('span', {
                 style: S.sub,
-                children: '先在上面点「生成账号密码链接（手机自己输密码）」，这里会变成登录页的二维码'
+                children: '先在上面点「生成账号密码链接」，这里会变成登录页的二维码'
               })
             : jsx(QrImage, { text: mode === 'net' ? pwUrl : link, size: 224 }),
           jsxs('div', {
@@ -3420,7 +3420,7 @@ function PhonePage({ ctx }) {
           pwMsg ? jsx('div', { style: pwMsg.ok ? S.okMsg : S.warnMsg, children: pwMsg.text }) : null,
           jsx('span', {
             style: S.sub,
-            children: '改完密码要点「重启面板」才生效 —— 密码是服务启动时读进内存的，重启前旧密码照样能登。'
+            children: '改完密码要点「重启面板」才生效（旧密码在重启前仍有效）。'
           })
         ]
       }),
@@ -3434,11 +3434,9 @@ function PhonePage({ ctx }) {
               jsx('b', { children: '状态是「未检测到」？' }),
               ' 说明后台服务没在跑 —— 点上面「启动服务」拉起来（等价于双击 ',
               jsx('code', { children: '启动手机网页-Start-Phone-Web.bat' }),
-              '，服务监听 0.0.0.0:',
+              ' 即可（监听 0.0.0.0:',
               cfg.port,
-              '，防火墙入站规则 ',
-              jsx('code', { children: 'Hermes Phone Chat ' + cfg.port }),
-              ' 已放行）。'
+              '）。'
             ]
           })
         ]
@@ -3450,7 +3448,7 @@ function PhonePage({ ctx }) {
             variant: 'text',
             size: 'inline',
             onClick: () => setShowSettings(!showSettings),
-            children: (showSettings ? '▾' : '▸') + ' 设置（局域网 IP / 端口 / 显示用的账号密码）'
+            children: (showSettings ? '▾' : '▸') + ' 设置（局域网 IP / 端口 / 账号密码）'
           }),
           showSettings
             ? jsxs('div', {
