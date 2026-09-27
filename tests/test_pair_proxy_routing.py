@@ -270,7 +270,9 @@ assert got.startswith(b"HTTP/1.1 200") and b'name="password"' in got, got[:200]
 got = talk(b"POST /pair/login HTTP/1.1",
            body=b"t=" + TOK.encode() + b"&username=demo&password=PW-OK")
 assert got.startswith(b"HTTP/1.1 302") and b"Location: /" in got, got[:300]
-assert b"__Host-hermes_session_at=GOODACCESS" in got and b"__Host-hermes_session_rt=GOODREFRESH" in got, got[:400]
+assert b"hermes_session_at=GOODACCESS" in got and b"hermes_session_rt=GOODREFRESH" in got, got[:400]
+# 这台上游是明文 http → 按 cookie scheme 规则发裸名；__Host- 前缀只在 https 下用（见 test_pair_cookie_scheme.py）
+assert b"__Host-" not in got, got[:400]
 assert state_now()["status"] == "claimed", state_now()
 again = talk(b"GET /pair?t=" + TOK.encode() + b" HTTP/1.1")
 assert b'name="password"' not in again, again[:200]

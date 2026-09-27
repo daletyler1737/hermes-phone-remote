@@ -66,7 +66,6 @@ def password_problem(password: str):
 
 DEFAULT_PORT = 9119
 DEFAULT_TTL_SECONDS = 12 * 60 * 60
-START_WAIT_SECONDS = 45.0
 
 
 class PasswordBody(BaseModel):
@@ -194,29 +193,6 @@ def _dashboard_env() -> Dict[str, str]:
     return env
 
 
-def _start_dashboard(port: int, host: str) -> int:
-    """后台拉一个 dashboard（不弹窗、关掉终端也活着）。返回 PID。"""
-    flags = 0
-    if os.name == "nt":
-        # DETACHED_PROCESS=脱离控制台（关掉桌面版也活着）；CREATE_NO_WINDOW=连
-        # 那一闪而过的黑窗口都不要（实机反馈：点「重启面板」不该弹终端）。
-        flags = (
-            int(getattr(subprocess, "DETACHED_PROCESS", 0))
-            | int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
-            | int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        )
-    log = _log_path()
-    with open(log, "ab") as fh:
-        fh.write(("\n--- %s restart ---\n" % time.strftime("%Y-%m-%d %H:%M:%S")).encode("utf-8"))
-        proc = subprocess.Popen(
-            [_hermes_exe(), "dashboard", "--host", host, "--port", str(port), "--no-open", "--skip-build"],
-            stdout=fh, stderr=fh, stdin=subprocess.DEVNULL,
-            creationflags=flags, start_new_session=(os.name != "nt"),
-            env=_dashboard_env(),
-        )
-    return proc.pid
-
-
 def _respawn_script() -> Path:
     """脱离式重启助手（装到 dashboard/tools/，源码工程里在 tools/）。"""
     here = Path(__file__).resolve().parent
@@ -234,6 +210,8 @@ def _respawn_self(port: int, host: str) -> int:
     返回 False，于是旧进程一直占着端口，新进程撞 BACKEND_PORT_IN_USE ——
     用户看到的就是「点了重启，其实什么都没换，密码还是旧的生效」。
     助手先等我们把响应发出去，再杀旧进程、等端口空出来、拉起新面板。
+    现在**启动和重启都走这里**（不再按「当前进程是不是监听者」分路）：
+    桌面版挂载插件路由时当前进程并不监听 9119，那条分路会让面板被关掉却起不来。
     """
     flags = 0
     if os.name == "nt":
@@ -244,10 +222,11 @@ def _respawn_self(port: int, host: str) -> int:
         )
     log = _log_path()
     with open(log, "ab") as fh:
-        fh.write(("\n--- %s restart (self-restart via helper) ---\n" % time.strftime("%Y-%m-%d %H:%M:%S")).encode("utf-8"))
+        fh.write(("\n--- %s restart (via helper) ---\n" % time.strftime("%Y-%m-%d %H:%M:%S")).encode("utf-8"))
         proc = subprocess.Popen(
             [sys.executable, str(_respawn_script()), "--port", str(port), "--host", host,
-             "--old-pid", str(os.getpid()), "--wait", "2", "--exe", _hermes_exe(), "--log", str(log)],
+             # 要换掉的是「占着端口的那个」，不一定是当前进程（桌面版挂载插件路由时就不是）
+             "--old-pid", str(_port_pid(port)), "--wait", "2", "--exe", _hermes_exe(), "--log", str(log)],
             stdout=fh, stderr=fh, stdin=subprocess.DEVNULL,
             creationflags=flags, start_new_session=(os.name != "nt"),
             env=_dashboard_env(), close_fds=True,
@@ -368,65 +347,34 @@ def set_password(body: PasswordBody) -> Dict[str, Any]:
 
 @router.post("/restart")
 def restart(body: RestartBody) -> Dict[str, Any]:
-    """重启面板服务：杀掉占用端口的进程，再原地拉起一个。
+    """重启（或启动）面板服务 —— 一律交给脱离式助手。
 
     改完密码必须走这一步，否则旧密码在进程内存里继续有效。
-    桌面版自己 → 请用面板上的「重启面板」而不是重启整个桌面版：
-    这个接口只动 dashboard 进程。
+
+    历史坑（用户报「点重新启动，只是关闭了，得再点一次启动」）：这里曾按
+    「os.getpid() 在不在监听者里」分两条路。桌面版挂载插件路由时，当前进程
+    并不监听 9119 → 走了「直接 kill 监听者再原地拉起」那条：面板当场被关掉，
+    而紧随其后的拉起又撞上端口还被旧进程占着 → 新进程起不来，用户看到的正是
+    「只关闭、没重启」。现在只有一条路：助手杀占端口的 → 等端口真空 → 拉起 →
+    自检，起不来就清一遍再来一次（见 tools/dashboard_respawn.py）。
     """
     port = int(body.port or 0) or DEFAULT_PORT
     host = (body.host or "0.0.0.0").strip() or "0.0.0.0"
 
-    listeners = _listeners(port)
-    if os.getpid() in listeners:
-        # 面板本身就跑在这个进程里 —— 只能走自杀式重启（见 _respawn_self）：
-        # 直接杀自己，后面这些代码不会执行，端口也腾不出来。
-        helper = _respawn_self(port, host)
-        return {
-            "ok": True,
-            "mode": "self-restart",
-            "port": port,
-            "helper_pid": helper,
-            "killed": [],
-            "pid": 0,
-            "waited_seconds": 0.0,
-            "lan_url": "http://%s:%d/" % (_lan_ip(), port),
-            "log": str(_log_path()),
-            "detail": "面板正在重启（1-3 秒）：先发完这条响应，再由助手进程换掉旧的，页面刷新即可；改过的密码这时才真正生效",
-        }
-
-    killed = [pid for pid in listeners if _kill(pid)]
-    if killed:
-        time.sleep(1.5)
-
-    pid = _start_dashboard(port, host)
-
-    healthy = False
-    waited = 0.0
-    while waited < START_WAIT_SECONDS:
-        if _port_open(port):
-            healthy = True
-            break
-        time.sleep(1.0)
-        waited += 1.0
-
-    result: Dict[str, Any] = {
-        "ok": healthy,
+    helper = _respawn_self(port, host)
+    return {
+        "ok": True,
+        "mode": "respawn",
         "port": port,
-        "killed": killed,
-        "pid": pid,
-        "waited_seconds": round(waited, 1),
-        "lan_url": "http://%s:%d/" % (_lan_ip(), port) if healthy else "",
+        "host": host,
+        "helper_pid": helper,
+        "killed": [],
+        "pid": 0,
+        "waited_seconds": 0.0,
+        "lan_url": "http://%s:%d/" % (_lan_ip(), port),
         "log": str(_log_path()),
+        "detail": "面板正在重启（约 6-13 秒）：先发完这条响应，助手再换掉旧进程并原地拉起，页面等它回来即可",
     }
-    if not healthy:
-        result["detail"] = "面板 45 秒内没起来，看日志尾部"
-        try:
-            tail = _log_path().read_text(encoding="utf-8", errors="replace").splitlines()[-15:]
-            result["tail"] = "\n".join(tail)
-        except OSError:
-            pass
-    return result
 
 
 # ─── 互联网模式：Cloudflare 快速隧道（公网访问）─────────────────────────────

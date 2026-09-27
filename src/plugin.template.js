@@ -226,6 +226,41 @@ function errText(e) {
   return typeof d === 'string' ? d : JSON.stringify(d)
 }
 
+/* ─── 探测与等待 ─────────────────────────────────────────────────────────
+   no-cors 只能判「连得上」：读不到状态码，但连得上就说明端口有人在监听。
+   重启过程靠它判断「旧面板退了没 / 新面板起来了没」，用户才看得到进度。 */
+async function svcAlive(url) {
+  try {
+    await fetch(url, { mode: 'no-cors', cache: 'no-store' })
+    return true
+  } catch {
+    return false
+  }
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms))
+
+/* 等旧面板退场；超时也放行（它本来就可能没在跑）。 */
+async function waitDown(url, ms) {
+  const end = Date.now() + ms
+  while (Date.now() < end) {
+    await sleep(1000)
+    if (!(await svcAlive(url))) return true
+  }
+  return false
+}
+
+/* 等新面板起监听。本机实测 6-13 秒，给足 60 秒。 */
+async function waitUp(url, ms) {
+  const end = Date.now() + ms
+  while (Date.now() < end) {
+    await sleep(1200)
+    if (await svcAlive(url)) return true
+  }
+  return false
+}
+
+
 /* ─── 服务在线探测 ───────────────────────────────────────────────────────
    no-cors 模式：读不到状态码，但「连得上」就说明 9119 在监听。
    浏览器 CSP 若拦掉请求会走 catch，此时给「未检测到」而不是误报在线。 */
@@ -235,12 +270,8 @@ function useServiceStatus(url) {
   useEffect(() => {
     let alive = true
     const probe = async () => {
-      try {
-        await fetch(url, { mode: 'no-cors', cache: 'no-store' })
-        if (alive) setState({ phase: 'online', at: Date.now() })
-      } catch {
-        if (alive) setState({ phase: 'offline', at: Date.now() })
-      }
+      const up = await svcAlive(url)
+      if (alive) setState({ phase: up ? 'online' : 'offline', at: Date.now() })
     }
     setState({ phase: 'checking', at: Date.now() })
     probe()
@@ -685,21 +716,36 @@ function PhonePage({ ctx }) {
 
   const doRestart = async () => {
     if (pwBusy) return
+    const port = Number(cfg.port) || 9119
+    const probeUrl = 'http://127.0.0.1:' + port + '/api/status'
+    const wasUp = svcUp
     setPwBusy('restart')
+    sayPw((wasUp ? '正在重启' : '正在启动') + '面板（约 6-13 秒）：先发请求，助手换掉旧进程再原地拉起', true)
     try {
-      const res = await rest('/restart', { method: 'POST', body: { port: Number(cfg.port) || 9119 } })
-      if (res && res.ok) {
-        sayPw('面板已重启 · ' + (res.lan_url || '端口 ' + res.port) + '（清掉 ' + (res.killed || []).length + ' 个旧进程）', true)
-        recheck()
-        loadLog()
-        os.notify('面板已重启', 'info')
+      const res = await rest('/restart', { method: 'POST', body: { port } })
+      if (!res || !res.ok) {
+        sayPw('面板没起来：' + ((res && res.detail) || '未知原因'), false)
+        return
+      }
+      // 等旧面板退场 → 按钮转「启动中…」→ 等新面板起监听。这样看到的是一个连续
+      // 过程，而不是「只关闭了」之后再让用户自己点一次「启动服务」。
+      await waitDown(probeUrl, 20000)
+      setPwBusy('boot')
+      sayPw('面板正在启动（端口 ' + port + '）…', true)
+      const up = await waitUp(probeUrl, 60000)
+      if (up) {
+        sayPw('面板已' + (wasUp ? '重启' : '启动') + ' · ' + (res.lan_url || '端口 ' + port), true)
+        os.notify('面板已' + (wasUp ? '重启' : '启动'), 'info')
       } else {
-        sayPw('面板没起来：' + ((res && res.detail) || '未知原因') + ((res && res.tail) ? '\n' + res.tail : ''), false)
+        sayPw('面板还没起来（等了 60 秒）：看日志 ' + (res.log || ''), false)
+        os.notify('面板没起来，看日志或点「重新检测」', 'warn')
       }
     } catch (e) {
       sayPw('重启失败：' + ((e && e.message) || e), false)
     } finally {
       setPwBusy('')
+      recheck()
+      loadLog()
     }
   }
 
@@ -785,7 +831,7 @@ function PhonePage({ ctx }) {
                 variant: 'outline',
                 size: 'sm',
                 onClick: doRestart,
-                children: pwBusy === 'restart' ? '启动中…' : '启动服务'
+                children: pwBusy === 'restart' ? '重启中…' : pwBusy === 'boot' ? '启动中…' : '启动服务'
               }),
           jsx(Button, { variant: 'text', size: 'inline', onClick: recheck, children: '重新检测' })
         ]
@@ -1113,7 +1159,7 @@ function PhonePage({ ctx }) {
                 variant: 'outline',
                 size: 'sm',
                 onClick: doRestart,
-                children: pwBusy === 'restart' ? (svcUp ? '重启中…' : '启动中…') : svcUp ? '重启面板' : '启动服务'
+                children: pwBusy === 'restart' ? '重启中…' : pwBusy === 'boot' ? '启动中…' : svcUp ? '重启面板' : '启动服务'
               }),
               jsx(Button, {
                 variant: 'text',

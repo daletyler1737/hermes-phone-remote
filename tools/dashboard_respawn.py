@@ -31,6 +31,9 @@ from pathlib import Path
 
 STILL_ACTIVE = 259
 
+# 拉起后等端口就绪的上限（秒）。本机实测面板起监听约 6-13 秒。
+FIRST_WAIT = 45.0
+
 
 def _alive(pid: int) -> bool:
     """PID 还活着吗。Windows 不能 os.kill(pid, 0)（那等于 TerminateProcess）。"""
@@ -176,15 +179,39 @@ def main() -> int:
         flags = (int(getattr(subprocess, "DETACHED_PROCESS", 0))
                  | int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
                  | int(getattr(subprocess, "CREATE_NO_WINDOW", 0)))
-    with open(log, "ab") as fh:
-        fh.write(("\n--- %s restart (by respawn helper) ---\n" % time.strftime("%Y-%m-%d %H:%M:%S")).encode("utf-8"))
-        proc = subprocess.Popen(
-            [exe, "dashboard", "--host", args.host, "--port", str(args.port), "--no-open", "--skip-build"],
-            stdout=fh, stderr=fh, stdin=subprocess.DEVNULL,
-            creationflags=flags, start_new_session=(os.name != "nt"),
-            env=_dashboard_env(), close_fds=True,
-        )
+    def spawn() -> subprocess.Popen:
+        with open(log, "ab") as fh:
+            fh.write(("\n--- %s restart (by respawn helper) ---\n" % time.strftime("%Y-%m-%d %H:%M:%S")).encode("utf-8"))
+            proc = subprocess.Popen(
+                [exe, "dashboard", "--host", args.host, "--port", str(args.port), "--no-open", "--skip-build"],
+                stdout=fh, stderr=fh, stdin=subprocess.DEVNULL,
+                creationflags=flags, start_new_session=(os.name != "nt"),
+                env=_dashboard_env(), close_fds=True,
+            )
+        return proc
+
+    def ready() -> bool:
+        return _port_busy(args.port, "127.0.0.1")
+
+    proc = spawn()
     _log(log, "respawn: 已拉起新面板 pid=%d（端口 %d）" % (proc.pid, args.port))
+
+    # 自检 + 一次重试：必须确认端口真的活了才算重启成功。用户报的「点了重新启动，
+    # 只是关闭了，要我再次点启动」= 上一版拉起后不检查，新进程撞上还没腾干净的端口
+    # （BACKEND_PORT_IN_USE）就没下文了。
+    if _wait(ready, FIRST_WAIT, 1.0):
+        _log(log, "respawn: 端口 %d 已就绪，重启完成" % args.port)
+        return 0
+
+    _log(log, "respawn: %.0f 秒内 %d 没起来，清掉占端口的再来一次" % (FIRST_WAIT, args.port))
+    for pid in [q for q in _listeners(args.port) if q != os.getpid()]:
+        _kill(pid)
+    _wait(lambda: not _port_busy(args.port), 15.0)
+    proc = spawn()
+    _log(log, "respawn: 第二次拉起 pid=%d%s" % (
+        proc.pid,
+        "，端口已就绪" if _wait(ready, FIRST_WAIT, 1.0) else "，仍没起来（见本日志上下文）",
+    ))
     return 0
 
 
