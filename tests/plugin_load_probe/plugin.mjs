@@ -3046,6 +3046,35 @@ function PhonePage({ ctx }) {
     }
   }
 
+  const doStop = async () => {
+    if (pwBusy) return
+    const port = Number(cfg.port) || 9119
+    const probeUrl = 'http://127.0.0.1:' + port + '/api/status'
+    setPwBusy('stop')
+    sayPw('正在关闭面板（公网链接一起收）…', true)
+    try {
+      const res = await rest('/stop', { method: 'POST', body: { port } })
+      if (!res || !res.killed) {
+        sayPw((res && res.detail) || '面板本来就没在跑', !!res)
+        return
+      }
+      const down = await waitDown(probeUrl, 20000)
+      sayPw(
+        down
+          ? '面板已关闭（端口 ' + port + '，pid ' + res.killed + '）'
+          : '发了关闭指令，但 ' + port + ' 还在响应',
+        down
+      )
+      os.notify(down ? '面板已关闭' : '面板没关干净，点「重新检测」看看', down ? 'info' : 'warn')
+    } catch (e) {
+      sayPw('关闭失败：' + ((e && e.message) || e), false)
+    } finally {
+      setPwBusy('')
+      recheck()
+      loadLog()
+    }
+  }
+
   const svcUp = !!(svc.data && svc.data.running) || status.phase === 'online'
   const tunUrl = (tun.data && tun.data.url) || ''
   const tunBusy = tun.phase === 'busy'
@@ -3123,7 +3152,12 @@ function PhonePage({ ctx }) {
           }),
           jsx('span', { children: statusText }),
           svcUp
-            ? null
+            ? jsx(Button, {
+                variant: 'outline',
+                size: 'sm',
+                onClick: doStop,
+                children: pwBusy === 'stop' ? '关闭中…' : '关闭面板'
+              })
             : jsx(Button, {
                 variant: 'outline',
                 size: 'sm',

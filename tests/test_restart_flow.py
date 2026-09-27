@@ -72,4 +72,69 @@ try:
 finally:
     A.subprocess.Popen, A._listeners, A._hermes_exe, A._respawn_script = real_popen, real_listeners, real_exe, real_script
 
-print("重启回归 OK：一律走助手（3 种 PID 身份）+ 换届的是端口占用者")
+# 3) /stop：关掉占端口的那个进程；隧道一起收；绝不关宿主进程
+import os  # noqa: E402
+
+killed, timers = [], []
+
+
+class _T:
+    def start(self):
+        pass
+
+
+real = (A._kill, A._listeners, A.threading.Timer, A._tunnel_snapshot, A._stop_tunnel, A.sys.argv)
+A._kill = lambda pid: (killed.append(pid), True)[1]
+A.threading.Timer = lambda delay, fn, args=(): (timers.append((delay, fn, args)), _T())[1]
+A._tunnel_snapshot = lambda: {"running": False}
+A._stop_tunnel = lambda: {"ok": True, "running": False}
+try:
+    # 面板在跑 → 排一个延后 kill（先让响应出去），且不是自己就不自退
+    del killed[:], timers[:]
+    A._listeners = lambda port: [555]
+    res = A.stop(A.StopBody(port=9119))
+    assert res["ok"] and res["killed"] == 555 and res["self"] is False, res
+    # 关进程是「排」出来的（先让响应发出去）—— 检查排了谁，再真跑一遍
+    assert len(timers) == 1, timers
+    delay, fn, args = timers[0]
+    assert fn is A._kill and args == (555,) and delay > 0, timers
+    fn(*args)
+    assert killed == [555], killed
+
+    # 没在跑 → 谁都不杀，如实回话
+    del killed[:], timers[:]
+    A._listeners = lambda port: []
+    res = A.stop(A.StopBody(port=9119))
+    assert res["killed"] == 0, res
+    assert not killed and not timers, (killed, timers)
+
+    # 自己就是面板（手机直连 9119 点关闭）→ 延后杀 + 延后硬退
+    del killed[:], timers[:]
+    A._listeners = lambda port: [os.getpid()]
+    A.sys.argv = ["hermes", "dashboard", "--port", "9119"]
+    res = A.stop(A.StopBody(port=9119))
+    assert res["killed"] == os.getpid() and res["self"] is True, res
+    assert [t[0] for t in timers] == [0.5, 1.0], timers
+
+    # 占端口的是宿主进程（桌面版本体，argv 里没有 dashboard）→ 409，谁都不动
+    del killed[:], timers[:]
+    A.sys.argv = ["Hermes.exe"]
+    try:
+        A.stop(A.StopBody(port=9119))
+        raise AssertionError("宿主进程也敢关？")
+    except A.HTTPException as e:
+        assert e.status_code == 409, e
+    assert not killed and not timers, (killed, timers)
+
+    # 隧道在跑 → 必须一起收：面板一死它就是指向死页面的公开地址
+    seen = []
+    A.sys.argv = ["hermes", "dashboard"]
+    A._listeners = lambda port: [555]
+    A._tunnel_snapshot = lambda: {"running": True, "url": "https://x.trycloudflare.com"}
+    A._stop_tunnel = lambda: (seen.append(1), {"ok": True, "running": False})[1]
+    A.stop(A.StopBody(port=9119))
+    assert seen == [1], seen
+finally:
+    A._kill, A._listeners, A.threading.Timer, A._tunnel_snapshot, A._stop_tunnel, A.sys.argv = real
+
+print("重启回归 OK：一律走助手（3 种 PID 身份）+ 换届的是端口占用者 + 关闭面板只杀端口占用者/宿主进程409/隧道一起收")

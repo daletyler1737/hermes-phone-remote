@@ -78,6 +78,10 @@ class RestartBody(BaseModel):
     host: Optional[str] = None
 
 
+class StopBody(BaseModel):
+    port: Optional[int] = None
+
+
 # ─── 小工具 ───────────────────────────────────────────────────────────────
 def _lan_ip() -> str:
     """本机在局域网里的 IP（UDP 探路，不发包）。"""
@@ -374,6 +378,51 @@ def restart(body: RestartBody) -> Dict[str, Any]:
         "lan_url": "http://%s:%d/" % (_lan_ip(), port),
         "log": str(_log_path()),
         "detail": "面板正在重启（约 6-13 秒）：先发完这条响应，助手再换掉旧进程并原地拉起，页面等它回来即可",
+    }
+
+
+def _is_panel_process() -> bool:
+    """当前进程是不是面板本体（`hermes dashboard …`）。
+
+    只用于 /stop 的自保判断：占端口的是自己时才敢退；占端口的是宿主（桌面版
+    体），退了等于把桌面版一起带走，宁可回 409 让用户去关桌面版。
+    """
+    return any("dashboard" in str(a).lower() for a in sys.argv)
+
+
+@router.post("/stop")
+def stop(body: StopBody) -> Dict[str, Any]:
+    """关闭面板服务 —— 杀占端口的那个进程，顺带收掉公网隧道。
+
+    隧道一起收：面板一死它就没人管了，公开地址会一直挂着指向一个死页面。
+
+    先回响应再动手（定时器延后 0.5 秒），否则这条请求自己会被掐断。
+    """
+    port = int(body.port or 0) or DEFAULT_PORT
+    # 放过隧道再动手：它有自己的进程和状态文件，留着就是个公开地址
+    snap = _tunnel_snapshot()
+    tunnel = _stop_tunnel() if snap.get("running") else {"ok": True, "running": False}
+
+    pid = _port_pid(port)
+    if not pid:
+        return {"ok": True, "port": port, "killed": 0, "tunnel": tunnel, "detail": "面板本来就没在跑"}
+    if pid == os.getpid() and not _is_panel_process():
+        raise HTTPException(409, detail="占端口的是宿主进程（桌面版本体），从这儿关会把桌面版一起带走 —— 请用桌面版自己的退出")
+
+    threading.Timer(0.5, _kill, args=(pid,)).start()
+    if pid == os.getpid():
+        # ponytail: _kill 不肯杀自己（有意的），面板从手机/网页直接点关闭时走到这儿，
+        # 用 os._exit 硬退最省事 —— 退之前该落盘的（config.yaml/隧道状态）已经写完了。
+        threading.Timer(1.0, lambda: os._exit(0)).start()
+
+    return {
+        "ok": True,
+        "port": port,
+        "killed": pid,
+        "self": pid == os.getpid(),
+        "tunnel": tunnel,
+        "log": str(_log_path()),
+        "detail": "面板正在关闭：先发完这条响应，再停掉占端口的进程",
     }
 
 
