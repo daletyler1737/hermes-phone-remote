@@ -41,4 +41,23 @@ assert m._token_status(st, "") == "invalid"
 assert m._token_status({**st, "expires": now - 1}, good) == "expired"
 assert m._token_status({**st, "status": "claimed"}, good) == "claimed"
 
-print("ok: 配对反代安全回归 12 项通过")
+# 6) 配对 token 的随机性：必须来自密码学随机源（用户红线「保护 token 随机性」）
+import secrets as _std                                        # noqa: E402
+import sys                                                    # noqa: E402
+_api_src = (ROOT / "dashboard" / "plugin_api.py").read_text(encoding="utf-8")
+assert "token_urlsafe(24)" in _api_src, "配对 token 生成点没了？"
+assert "random." not in _api_src, "配对 token 不许走非密码学随机源"
+_s2 = importlib.util.spec_from_file_location("phone_remote_api", ROOT / "dashboard" / "plugin_api.py")
+A = importlib.util.module_from_spec(_s2)
+sys.modules["phone_remote_api"] = A
+_s2.loader.exec_module(A)
+assert A.secrets is _std, "必须是 stdlib secrets（不是 random / 自研）"
+assert A.PAIR_TTL_SECONDS <= 900, f"配对链接 TTL 太宽：{A.PAIR_TTL_SECONDS}s"
+_N = 20000
+_ALPHA64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+toks = {A.secrets.token_urlsafe(24) for _ in range(_N)}
+assert len(toks) == _N, f"{_N} 次生成有撞车"
+assert all(len(t) == 32 for t in toks), "长度必须恒为 32 字符（24 字节 → 192 bit）"
+assert all(set(t) <= set(_ALPHA64) for t in toks), "字符集必须落在 urlsafe base64"
+
+print("ok: 配对反代安全回归 17 项通过")

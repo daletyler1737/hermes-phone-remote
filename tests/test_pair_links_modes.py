@@ -151,4 +151,42 @@ st = api._pair_read()
 check("claim 前 approve=approved", api._pair_entry(st, "approve")["status"] == "approved")
 check("claim 前 password=pending", api._pair_entry(st, "password")["status"] == "pending")
 
+print("[7] 过期的 pending 链接自动换新（用户要的「10 分钟一变」，不用回去点「换一个新链接」）")
+
+
+_ALPHA64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"   # urlsafe base64
+
+
+def _set(mode: str, **kw) -> None:
+    st = api._pair_read()
+    api._pair_entry(st, mode).update(**kw)
+    api._pair_write(st)
+
+
+tok_live = api._pair_entry(api._pair_read(), "password")["token"]
+_set("password", status="pending", expires=time.time() + 300, ip="1.1.1.1", ua="UA")
+api.pair_status()
+e = api._pair_entry(api._pair_read(), "password")
+check("没过期的 pending 原样不动（别把正在扫的那条换掉）", e["token"] == tok_live and e["ip"] == "1.1.1.1")
+
+_set("password", status="pending", expires=time.time() - 1, ip="1.1.1.1", ua="UA")
+api.pair_status()
+e = api._pair_entry(api._pair_read(), "password")
+check("过期的 pending 换成了新 token", e["token"] != tok_live)
+check("新 token 还是 32 位 urlsafe", len(e["token"]) == 32 and set(e["token"]) <= set(_ALPHA64))
+check("有效期挪到未来（重新计时 10 分钟）", e["expires"] > time.time() + 500)
+check("状态回到 pending", e["status"] == "pending")
+check("上一台手机的 ip/ua 痕迹清掉", e["ip"] == "" and e["ua"] == "")
+check("换新后 url 指向新 token", api.pair_status()["links"]["password"]["url"].endswith(e["token"]))
+
+for _st in ("approved", "denied", "claimed"):
+    _set("password", status=_st, expires=time.time() - 1, token="KEEPME_" + _st)
+    api.pair_status()
+    check("status=%s 一律不换 token" % _st,
+          api._pair_entry(api._pair_read(), "password")["token"] == "KEEPME_" + _st)
+
+_set("password", status="pending", expires=time.time() - 1, token="")
+api.pair_status()
+check("没有 token 的空槽不会凭空造一条", api._pair_entry(api._pair_read(), "password")["token"] == "")
+
 print("\nok: 两种模式各自一条链接回归 %d 项通过" % ok)

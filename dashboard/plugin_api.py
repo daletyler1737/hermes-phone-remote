@@ -791,6 +791,30 @@ def _pair_links(tunnel: str) -> Dict[str, Any]:
     return out
 
 
+def _renew_expired_pending() -> bool:
+    """过期的 pending 链接就地换一条新的 —— 面板开着时二维码一直有效，不用回去点「换一个新链接」。
+
+    只在**已经过期**时才换：有效期还是 10 分钟、语义和手头这条完全一样，
+    只是不会变成一张死码（用户要的「10 分钟一变」）。approved / claimed / denied 一律不碰。
+    ponytail: 读-改-写窗口里手机若正好 claim 会被盖回 pending（微秒级 + 前端 2.5s 才轮询一次，
+    最坏是多一条没人用的 pending 链接，登录态不受影响）。
+    """
+    state = _pair_read()
+    now = time.time()
+    changed = False
+    for mode in PAIR_MODES:
+        entry = _pair_entry(state, mode)
+        if not entry or str(entry.get("status") or "") != "pending":
+            continue
+        if not entry.get("token") or float(entry.get("expires") or 0) > now:
+            continue
+        entry.update(token=secrets.token_urlsafe(24), created=now, expires=now + PAIR_TTL_SECONDS, ip="", ua="")
+        changed = True
+    if changed:
+        _pair_write(state)
+    return changed
+
+
 class PairBody(BaseModel):
     action: str = "new"
     mode: str = "approve"      # approve（批准模式）| password（账号密码模式）
@@ -798,6 +822,7 @@ class PairBody(BaseModel):
 
 @router.get("/pair")
 def pair_status() -> Dict[str, Any]:
+    _renew_expired_pending()      # 前端每 2.5s 轮询这里 → 过期的那条自动换新，卡片不会变死码
     snap = _tunnel_snapshot()
     tunnel = str(snap.get("url") or "")
     return {
