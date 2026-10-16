@@ -342,10 +342,20 @@ def set_password(body: PasswordBody) -> Dict[str, Any]:
         save_config(config)
     except Exception as exc:
         raise HTTPException(500, detail="写 config.yaml 失败：%s" % exc)
+
+    # 顺手把同一串写进第三方 WebUI 的 .env（「密码绑定」）：两处一个密码，
+    # 用户在面板上看到的那串就是网页版的登录密码。这一步失败不能拖垮改密码，
+    # 所以整体兜住，结果随响应带回去给面板显示。
+    try:
+        webui = _webui_sync_password(password)
+    except Exception as exc:              # noqa: BLE001 —— 兜底：任何异常都不该让改密码失败
+        webui = {"synced": False, "detail": "同步网页版密码失败：%s" % exc}
+
     return {
         "ok": True,
         "username": username,
         "restart_required": True,   # 密码是 register() 时读进内存的，必须重启面板才生效
+        "webui": webui,
     }
 
 
@@ -741,6 +751,15 @@ def _start_pair_proxy(port: int) -> None:
         flags = int(getattr(subprocess, "CREATE_NO_WINDOW", 0)) | int(getattr(subprocess, "DETACHED_PROCESS", 0))
     env = dict(os.environ)
     env.update(HPR_PORT=str(PAIR_PORT), HPR_UPSTREAM="127.0.0.1:%d" % port, HPR_STATE=str(_pair_state_path()))
+    # 已批准的设备透传时注入可信身份头：网页版（第三方 WebUI）认这个头就免密放行，
+    # 手机侧因此不需要知道网页版密码。值取面板登录名；外部设备伪造不了同名头 ——
+    # 反代只跑在本机，且 _with_identity() 会把客户端自带的同名头剥掉再自己写一份。
+    try:
+        from hermes_cli.config import load_config  # noqa: PLC0415
+        trusted_user = str(_basic_auth(load_config() or {}).get("username") or "admin").strip() or "admin"
+    except Exception:                                    # noqa: BLE001 配置读不到就退回默认名，绝不因此起不来
+        trusted_user = "admin"
+    env.update(HPR_TRUSTED_USER=trusted_user, HPR_TRUSTED_HEADER="Remote-User")
     with open(log, "ab") as fh:
         _PAIR["proc"] = subprocess.Popen(
             [sys.executable, str(_pair_script())], env=env, stdout=fh, stderr=fh,
@@ -1007,3 +1026,259 @@ def tunnel(body: TunnelBody) -> Dict[str, Any]:
         "log": str(log),
     }
 
+# ─── 网页版 WebUI（第三方）：密码绑定 + 起停 ──────────────────────────────────
+#
+# 为什么在这里管它的密码
+# ----------------------
+# 第三方 WebUI 首次启动会给自己随机生成一个登录密码写进它自己的 .env —— 用户从头
+# 到尾不知道它是多少（桌面端窗口登一次就不用再输，可人换机器 / 清了缓存就抓瞎）。
+# 所以把这一串并进插件统一管：面板改密码时顺手把同一串写进 WebUI 的 .env（这就是
+# 「绑定」），面板上能直接看、直接复制，起 / 停 / 重启都在同一个地方下手。
+#
+# 手机那头不需要这串密码：走手机门禁的已批准设备由 pair_proxy 注入可信身份头
+# (Remote-User)，WebUI 认头即免密；而可信头只对来自本机 127.0.0.1 的请求生效 ——
+# 所以 WebUI 一律只绑回环，外部设备既看不到它的登录页，也伪造不了那个头。
+
+WEBUI_DIR_CANDIDATES = (
+    r"E:\zip\agent file big\06_工具软件\hermes-webui",
+)
+WEBUI_PORT_FALLBACK = 8787
+WEBUI_LOOPBACK = "127.0.0.1"     # 只回环：对外入口一律走手机门禁，别把登录页摊给同网段
+
+
+def _webui_dir() -> Optional[Path]:
+    """找第三方 WebUI 目录（认 bootstrap.py + .env）。环境变量优先。"""
+    cands: List[Path] = []
+    env_dir = (os.environ.get("HERMES_WEBUI_DIR") or "").strip()
+    if env_dir:
+        cands.append(Path(env_dir))
+    cands += [Path(p) for p in WEBUI_DIR_CANDIDATES]
+    for cand in cands:
+        try:
+            if (cand / "bootstrap.py").is_file() and (cand / ".env").is_file():
+                return cand
+        except OSError:
+            continue
+    return None
+
+
+def _webui_env(webui_dir: Path) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    try:
+        text = (webui_dir / ".env").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return out
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        out[key.strip()] = value.strip().strip('"').strip("'")
+    return out
+
+
+def _webui_set_env(webui_dir: Path, updates: Dict[str, str]) -> None:
+    """按行改写 .env：命中就换值，没命中就追加。注释、顺序、换行风格都留着。"""
+    path = webui_dir / ".env"
+    with open(str(path), "r", encoding="utf-8", errors="replace", newline="") as fh:
+        raw = fh.read()
+    newline = "\r\n" if "\r\n" in raw else "\n"
+    lines = raw.split(newline)
+    pending = dict(updates)
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key = stripped.split("=", 1)[0].strip()
+        if key in pending:
+            lines[idx] = "%s=%s" % (key, pending.pop(key))
+    if pending:
+        while lines and not lines[-1].strip():
+            lines.pop()
+        lines.append("")
+        lines.append("# 下面两项由「连接手机」插件维护：面板改密码时同步写入")
+        for key, value in pending.items():
+            lines.append("%s=%s" % (key, value))
+        lines.append("")
+    with open(str(path), "w", encoding="utf-8", newline="") as fh:
+        fh.write(newline.join(lines))
+
+
+def _webui_port(webui_dir: Path) -> int:
+    raw_port = str(_webui_env(webui_dir).get("HERMES_WEBUI_PORT") or "").strip()
+    return int(raw_port) if raw_port.isdigit() else WEBUI_PORT_FALLBACK
+
+
+def _webui_host(webui_dir: Path) -> str:
+    return str(_webui_env(webui_dir).get("HERMES_WEBUI_HOST") or "").strip() or WEBUI_LOOPBACK
+
+
+def _webui_python(webui_dir: Path) -> str:
+    return str(_webui_env(webui_dir).get("HERMES_WEBUI_PYTHON") or "").strip() or sys.executable
+
+
+def _webui_log_path(webui_dir: Path) -> Path:
+    return _log_path().parent / "webui.log"
+
+
+def _webui_running(webui_dir: Path) -> bool:
+    return _port_open(_webui_port(webui_dir))
+
+
+def _webui_stop(webui_dir: Path) -> List[int]:
+    port = _webui_port(webui_dir)
+    killed: List[int] = []
+    for pid in _listeners(port):
+        if pid and _kill(pid):
+            killed.append(pid)
+    deadline = time.time() + 8.0
+    while time.time() < deadline and _port_open(port):
+        time.sleep(0.25)
+    return killed
+
+
+def _webui_tail(webui_dir: Path, lines: int = 8) -> str:
+    try:
+        text = _webui_log_path(webui_dir).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    return "\n".join(text.splitlines()[-lines:])
+
+
+def _webui_start(webui_dir: Path) -> int:
+    """脱离式拉起 WebUI（bootstrap.py 自己会再 fork 并探活）。"""
+    port = _webui_port(webui_dir)
+    host = _webui_host(webui_dir)
+    log = _webui_log_path(webui_dir)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    flags = 0
+    if os.name == "nt":
+        flags = int(getattr(subprocess, "CREATE_NO_WINDOW", 0)) | int(getattr(subprocess, "DETACHED_PROCESS", 0))
+    with open(str(log), "ab") as fh:
+        proc = subprocess.Popen(
+            [_webui_python(webui_dir), str(webui_dir / "bootstrap.py"), str(port), "--host", host],
+            cwd=str(webui_dir), stdout=fh, stderr=fh, stdin=subprocess.DEVNULL, creationflags=flags,
+        )
+    waited = 0.0
+    while waited < 25.0 and not _port_open(port):
+        time.sleep(0.4)
+        waited += 0.4
+    if not _port_open(port):
+        raise HTTPException(502, detail="网页版 25 秒内没起来：\n" + _webui_tail(webui_dir))
+    return proc.pid
+
+
+def _webui_restart(webui_dir: Path) -> Dict[str, Any]:
+    killed = _webui_stop(webui_dir)
+    pid = _webui_start(webui_dir)
+    return {"killed": killed, "pid": pid, "running": True}
+
+
+def _webui_snapshot() -> Dict[str, Any]:
+    webui_dir = _webui_dir()
+    if not webui_dir:
+        return {"found": False, "detail": "没找到第三方 WebUI 目录（要找 bootstrap.py + .env）"}
+    env = _webui_env(webui_dir)
+    port = _webui_port(webui_dir)
+    password = str(env.get("HERMES_WEBUI_PASSWORD") or "")
+    return {
+        "found": True,
+        "dir": str(webui_dir),
+        "host": _webui_host(webui_dir),
+        "port": port,
+        "running": _port_open(port),
+        "url": "http://127.0.0.1:%d/" % port,
+        "password": password,
+        "password_set": bool(password),
+        "trusted_header": str(env.get("HERMES_WEBUI_TRUSTED_AUTH_HEADER") or ""),
+        "trusted_cidrs": str(env.get("HERMES_WEBUI_TRUSTED_PROXY_CIDRS") or ""),
+        "python": _webui_python(webui_dir),
+        "log": str(_webui_log_path(webui_dir)),
+    }
+
+
+def _webui_sync_password(password: str) -> Dict[str, Any]:
+    """把面板密码写进 WebUI 的 .env（绑定）。在跑就重启，让它立刻生效。"""
+    webui_dir = _webui_dir()
+    if not webui_dir:
+        return {"synced": False, "detail": "没找到第三方 WebUI 目录，跳过"}
+    try:
+        _webui_set_env(webui_dir, {"HERMES_WEBUI_PASSWORD": password})
+    except OSError as exc:
+        return {"synced": False, "detail": "写 .env 失败：%s" % exc}
+    out: Dict[str, Any] = {"synced": True, "dir": str(webui_dir)}
+    if _webui_running(webui_dir):
+        try:
+            out.update(_webui_restart(webui_dir))
+            out["detail"] = "网页版密码已同步并重启生效"
+        except HTTPException as exc:
+            out["restart_error"] = str(exc.detail)
+            out["detail"] = "密码已写入，但网页版重启失败（下次启动生效）"
+    else:
+        out["detail"] = "密码已写入（网页版没在跑，下次启动生效）"
+    return out
+
+
+class WebuiBody(BaseModel):
+    password: Optional[str] = None
+    action: Optional[str] = None          # save | start | stop | restart
+    host: Optional[str] = None
+    port: Optional[int] = None
+
+
+@router.get("/webui")
+def webui_status() -> Dict[str, Any]:
+    """网页版现状：目录、端口、在不在跑、当前密码（面板要显示给用户）。"""
+    return _webui_snapshot()
+
+
+@router.post("/webui")
+def webui(body: WebuiBody) -> Dict[str, Any]:
+    """网页版管理：写密码 / 起 / 停 / 重启。
+
+    ``action=save`` + ``password`` = 只把密码写进 .env（在跑就顺手重启生效）。
+    """
+    webui_dir = _webui_dir()
+    if not webui_dir:
+        raise HTTPException(404, detail="没找到第三方 WebUI 目录（要找 bootstrap.py + .env）")
+
+    action = (body.action or "").strip().lower()
+    password = (body.password or "").strip()
+    updates: Dict[str, str] = {}
+    if password:
+        problem = password_problem(password)
+        if problem:
+            raise HTTPException(400, detail=problem)
+        updates["HERMES_WEBUI_PASSWORD"] = password
+    if body.port:
+        updates["HERMES_WEBUI_PORT"] = str(int(body.port))
+    if body.host:
+        updates["HERMES_WEBUI_HOST"] = body.host.strip()
+    if updates:
+        try:
+            _webui_set_env(webui_dir, updates)
+        except OSError as exc:
+            raise HTTPException(500, detail="写 .env 失败：%s" % exc)
+
+    if action == "stop":
+        killed = _webui_stop(webui_dir)
+        return {"ok": True, "action": "stop", "killed": killed, **_webui_snapshot()}
+
+    if action in ("start", "restart"):
+        payload: Dict[str, Any] = {"ok": True, "action": action}
+        if action == "restart" or _webui_running(webui_dir):
+            payload.update(_webui_restart(webui_dir))
+        else:
+            payload["pid"] = _webui_start(webui_dir)
+        payload.update(_webui_snapshot())
+        return payload
+
+    # 没点名 action：写密码后按需重启（密码是启动时读进内存的，不重启不生效）
+    payload = {"ok": True, "action": "save" if updates else "status", "changed": sorted(updates)}
+    if password and _webui_running(webui_dir):
+        payload.update(_webui_restart(webui_dir))
+        payload["detail"] = "密码已写入并重启生效"
+    elif updates:
+        payload["detail"] = "已写入 .env（网页版没在跑，下次启动生效）"
+    payload.update(_webui_snapshot())
+    return payload

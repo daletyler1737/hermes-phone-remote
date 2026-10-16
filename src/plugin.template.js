@@ -446,6 +446,11 @@ function PhonePage({ ctx }) {
   const [pwShow, setPwShow] = useState(false)
   const [pwBusy, setPwBusy] = useState('')
   const [pwMsg, setPwMsg] = useState(null)
+  // 网页版（第三方 WebUI）：它的密码由插件统一管 —— 面板改密码时后端同步写它的 .env
+  const [webui, setWebui] = useState({ phase: 'loading' })
+  const [webuiShow, setWebuiShow] = useState(false)
+  const [webuiBusy, setWebuiBusy] = useState('')
+  const [webuiMsg, setWebuiMsg] = useState(null)
   const [svc, setSvc] = useState({ phase: 'loading' })
   const [log, setLog] = useState(null)
   const [mode, setMode] = useState('lan')                 // lan = 同一 WiFi；net = 公网隧道
@@ -676,6 +681,7 @@ function PhonePage({ ctx }) {
       })
     loadLog()
     loadTun()
+    loadWebui()
     return () => {
       alive = false
     }
@@ -705,12 +711,66 @@ function PhonePage({ ctx }) {
       const user = (res && res.username) || cfg.user
       saveCfg({ ...cfg, user, pass: value }) // 面板上显示的密码跟着换新（明文只落在插件自己的 storage）
       setPw('')
-      sayPw('已写入 config.yaml · 账号 ' + user + ' 的新密码要等「重启面板」之后才生效', true)
+      const wsync = res && res.webui
+      sayPw(
+        '已写入 config.yaml · 账号 ' +
+          user +
+          ' 的新密码要等「重启面板」之后才生效' +
+          (wsync && wsync.synced ? '；网页版已同步同一串密码' : ''),
+        true
+      )
+      loadWebui()
       os.notify('密码已更新，点「重启面板」生效', 'info')
     } catch (e) {
       sayPw('改密码失败：' + ((e && e.message) || e), false)
     } finally {
       setPwBusy('')
+    }
+  }
+
+  /* ─── 网页版 WebUI（第三方）：和面板共用一个密码 ──────────────────────────
+     手机那头不需要这串密码：批准过的设备由门禁注入可信身份头，认头即免密。
+     这里管的是「人坐在电脑前打开网页版」时用的那串 —— 面板上看到的就是它。 */
+  const loadWebui = () =>
+    rest('/webui')
+      .then(d => setWebui({ phase: 'ok', data: d }))
+      .catch(e => setWebui({ phase: 'error', error: errText(e) }))
+
+  const sayWebui = (text, ok) => setWebuiMsg({ text, ok })
+
+  const doWebuiCopy = async () => {
+    const value = (webui.data || {}).password || ''
+    if (!value) {
+      sayWebui('还没有密码 —— 先点「与面板密码绑定」', false)
+      return
+    }
+    const ok = await os.copy(value)
+    sayWebui(ok ? '密码已复制' : '复制失败，请手动选中复制', ok)
+  }
+
+  const doWebui = async action => {
+    if (webuiBusy) return
+    if (action === 'bind' && !String(cfg.pass || '').trim()) {
+      sayWebui('面板密码还不知道 —— 先在「登录密码」那张卡里设一次，网页版跟着用同一串', false)
+      return
+    }
+    setWebuiBusy(action)
+    setWebuiMsg(null)
+    try {
+      const body = { action }
+      // bind = 把面板那串（明文只落在插件自己的 storage）写进网页版的 .env
+      if (action === 'bind') body.password = cfg.pass
+      const res = await rest('/webui', { method: 'POST', body })
+      setWebui({ phase: 'ok', data: res })
+      const verb =
+        action === 'stop' ? '已停止' : action === 'bind' ? '已绑定面板密码' : action === 'start' ? '已启动' : '已重启'
+      sayWebui(verb + (res && res.detail ? ' · ' + res.detail : ''), true)
+      os.notify('网页版：' + verb, 'info')
+    } catch (e) {
+      sayWebui('操作失败：' + errText(e), false)
+      loadWebui()
+    } finally {
+      setWebuiBusy('')
     }
   }
 
@@ -819,6 +879,17 @@ function PhonePage({ ctx }) {
       ? '最近一次手机登录：' + (last.ok ? '成功' : '失败') + (last.ip ? ' · ' + last.ip : '')
       : '还没有手机登录过'
 
+  const webuiUp = !!(webui.data && webui.data.running)
+  const webuiText =
+    webui.phase === 'loading'
+      ? '读取中…'
+      : webui.phase === 'error'
+        ? '读取失败'
+        : webui.data && webui.data.found === false
+          ? '没找到'
+          : webuiUp
+            ? '运行中'
+            : '未运行'
   const svcText =
     svc.phase === 'loading'
       ? '正在读取面板状态…'
@@ -1208,6 +1279,84 @@ function PhonePage({ ctx }) {
           jsx('span', {
             style: S.sub,
             children: '改完密码要点「重启面板」才生效（旧密码在重启前仍有效）。'
+          })
+        ]
+      }),
+
+      // 网页版（第三方 WebUI）：密码跟着面板走，不用记第二串
+      jsxs('div', {
+        style: S.card2,
+        children: [
+          jsxs('div', {
+            style: S.row,
+            children: [
+              jsx('span', { style: S.cardTitle, children: '网页版 WebUI' }),
+              jsx('span', { style: S.sub, children: webuiText })
+            ]
+          }),
+          jsx('span', {
+            style: S.sub,
+            children:
+              webui.data && webui.data.found === false
+                ? webui.data.detail || '没找到网页版目录'
+                : '本机地址 ' + (webui.data && webui.data.url ? webui.data.url : '') + '（只绑回环，同网段看不到）'
+          }),
+          jsxs('div', {
+            style: S.field,
+            children: [
+              jsx('span', { style: S.fieldKey, children: '登录密码' }),
+              jsx(Input, {
+                size: 'sm',
+                readOnly: true,
+                type: webuiShow ? 'text' : 'password',
+                value: (webui.data && webui.data.password) || '',
+                placeholder: '点下面「与面板密码绑定」',
+                onChange: () => {}
+              })
+            ]
+          }),
+          jsxs('div', {
+            style: S.row,
+            children: [
+              jsx(Button, {
+                variant: 'ghost',
+                size: 'sm',
+                onClick: () => setWebuiShow(!webuiShow),
+                children: webuiShow ? '隐藏' : '显示'
+              }),
+              jsx(Button, {
+                variant: 'ghost',
+                size: 'sm',
+                onClick: doWebuiCopy,
+                children: '复制'
+              }),
+              jsx(Button, {
+                variant: 'secondary',
+                size: 'sm',
+                onClick: () => doWebui('bind'),
+                children: webuiBusy === 'bind' ? '绑定中…' : '与面板密码绑定'
+              }),
+              jsx(Button, {
+                variant: 'outline',
+                size: 'sm',
+                onClick: () => doWebui(webuiUp ? 'restart' : 'start'),
+                children: webuiBusy === 'start' || webuiBusy === 'restart' ? '处理中…' : webuiUp ? '重启网页版' : '启动网页版'
+              }),
+              webuiUp
+                ? jsx(Button, {
+                    variant: 'text',
+                    size: 'inline',
+                    onClick: () => doWebui('stop'),
+                    children: '停止'
+                  })
+                : null
+            ]
+          }),
+          webuiMsg ? jsx('div', { style: webuiMsg.ok ? S.okMsg : S.warnMsg, children: webuiMsg.text }) : null,
+          jsx('span', {
+            style: S.sub,
+            children:
+              '在「登录密码」那张卡里改密码时，后端会顺手把这串写进网页版 —— 两处一个密码。手机上不用记它：批准过的设备由门禁注入身份头，直接进。'
           })
         ]
       }),

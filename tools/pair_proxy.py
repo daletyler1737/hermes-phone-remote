@@ -65,6 +65,10 @@ CLAIM_TTL = int(os.environ.get("HPR_CLAIM_TTL") or 120)       # 批准后多久�
 HERMES_HOME = Path(os.environ.get("HERMES_HOME") or (Path.home() / "AppData" / "Local" / "hermes"))
 HERMES_AGENT = Path(os.environ.get("HERMES_AGENT_DIR") or (HERMES_HOME / "hermes-agent"))
 STATE_PATH = Path(os.environ.get("HPR_STATE") or (HERMES_HOME / "phone-remote" / "pair.json"))
+# 免密接 WebUI：批准过的设备透传时注入身份头，省掉「在手机上再登一次 WebUI 密码」。
+# 留空 = 不注入（默认，行为与改动前完全一致）。对应 WebUI 侧 HERMES_WEBUI_TRUSTED_AUTH_HEADER。
+TRUSTED_USER = (os.environ.get("HPR_TRUSTED_USER") or "").strip()
+TRUSTED_HEADER = (os.environ.get("HPR_TRUSTED_HEADER") or "Remote-User").strip() or "Remote-User"
 _lock = threading.Lock()
 _CODE_MTIME = os.path.getmtime(__file__)   # ponytail: 面板靠它认出「端口上那个进程跑的是哪版脚本」（改了代码没重起的坑）
 
@@ -550,6 +554,19 @@ def _one_shot(head: bytes) -> bytes:
     return b"\r\n".join(keep + [b"Connection: close"])
 
 
+def _with_identity(head: bytes) -> bytes:
+    """透传前注入可信身份头（WebUI 的 ``Remote-User``）。
+
+    必须先剥掉客户端自带的同名头：门禁跑在回环上，WebUI 只信回环来的这个头 —— 少剥一层，
+    手机自己发一个 ``Remote-User`` 就能冒充身份、跳过 WebUI 登录（安全红线）。
+    """
+    if not TRUSTED_USER:
+        return head
+    name = TRUSTED_HEADER.lower().encode()
+    lines = [ln for ln in head.split(b"\r\n") if not ln.lower().startswith(name + b":")]
+    return b"\r\n".join(lines + [TRUSTED_HEADER.encode() + b": " + TRUSTED_USER.encode()])
+
+
 def _handle(conn: socket.socket) -> None:
     up = None
     try:
@@ -577,7 +594,7 @@ def _handle(conn: socket.socket) -> None:
                             ctype="text/plain; charset=utf-8")
         up = socket.create_connection(UPSTREAM, timeout=10)
         up.settimeout(None)   # 建连超时用完就撤，别让 10s 读超时把长连接掐了
-        up.sendall(_one_shot(head) + b"\r\n\r\n" + rest)
+        up.sendall(_with_identity(_one_shot(head)) + b"\r\n\r\n" + rest)
         conn.settimeout(None)
         _pump(conn, up)
     except (OSError, ValueError):
