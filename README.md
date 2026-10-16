@@ -16,10 +16,11 @@ Two modes:
 
 ## Status
 
-**v0.3.0** (2026-09). Working, verified end-to-end: LAN login, scan-to-pair over a real
+**v0.3.1** (2026-09). Working, verified end-to-end: LAN login, scan-to-pair over a real
 Cloudflare tunnel, byte-identical assets through the tunnel, panel one-step self-restart,
 one-click **Close panel**, and pairing QR codes that **renew themselves** when the 10-minute
 token expires (the card never turns into a dead code).
+Since v0.3.1 the third-party **WebUI login password is bound to the panel password** — one string for both.
 The stock dashboard's mobile portrait layout is not adapted (use landscape or "desktop site").
 
 ## How it works
