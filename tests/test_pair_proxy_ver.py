@@ -53,6 +53,7 @@ def demo() -> None:
                     time.sleep(0.25)
             ver = json.loads(_get(port, "/pair/_ver"))
             assert abs(ver["mtime"] - os.path.getmtime(SCRIPT)) < 1e-6, ver   # 面板靠这个 mtime 判新旧
+            assert ver["upstream"] == "127.0.0.1:9", ver   # 面板靠它判「手机页面」换了上游没
             assert json.loads(_get(port, "/pair/state?t=" + tok))["status"] == "pending"   # links 格式必须认得
             assert json.loads(_get(port, "/pair/state?t=" + "x" * 24))["status"] == "invalid"
             assert "等待电脑端批准" in _get(port, "/pair?t=" + tok)           # 扫码页不是「链接已失效」

@@ -774,6 +774,27 @@ function PhonePage({ ctx }) {
     }
   }
 
+  // 手机页面用哪个上游：第三方网页版（默认，界面本来就是给手机做的）/ 自带面板。
+  // 切换后后端会顺手把门禁反代换掉 —— 前面照样先过配对，只是进门后看到的东西变了。
+  const setPhonePage = async page => {
+    if (webuiBusy) return
+    setWebuiBusy('page')
+    setWebuiMsg(null)
+    try {
+      const res = await rest('/webui', { method: 'POST', body: { phone_page: page } })
+      setWebui({ phase: 'ok', data: res })
+      const pair = (res && res.pair) || {}
+      const name = page === 'webui' ? '网页版 WebUI' : '自带面板'
+      sayWebui(pair.ok ? '手机页面已切到「' + name + '」 · 上游 ' + (pair.upstream || '') : '切换失败：' + (pair.detail || '未知'), !!pair.ok)
+      if (pair.ok) os.notify('手机页面：' + name, 'info')
+    } catch (e) {
+      sayWebui('切换失败：' + errText(e), false)
+      loadWebui()
+    } finally {
+      setWebuiBusy('')
+    }
+  }
+
   const doRestart = async () => {
     if (pwBusy) return
     const port = Number(cfg.port) || 9119
@@ -880,6 +901,8 @@ function PhonePage({ ctx }) {
       : '还没有手机登录过'
 
   const webuiUp = !!(webui.data && webui.data.running)
+  // 手机页面落到哪个上游（后端存着，前端只负责显示和切换）
+  const phonePage = (webui.data && webui.data.phone_page) || 'webui'
   const webuiText =
     webui.phase === 'loading'
       ? '读取中…'
@@ -1351,6 +1374,31 @@ function PhonePage({ ctx }) {
                   })
                 : null
             ]
+          }),
+          jsxs('div', {
+            style: S.row,
+            children: [
+              jsx('span', { style: S.fieldKey, children: '手机页面' }),
+              jsx(Button, {
+                variant: phonePage === 'webui' ? 'secondary' : 'outline',
+                size: 'sm',
+                onClick: () => setPhonePage('webui'),
+                children: webuiBusy === 'page' ? '切换中…' : '网页版 WebUI'
+              }),
+              jsx(Button, {
+                variant: phonePage === 'panel' ? 'secondary' : 'outline',
+                size: 'sm',
+                onClick: () => setPhonePage('panel'),
+                children: '自带面板'
+              })
+            ]
+          }),
+          jsx('span', {
+            style: S.sub,
+            children:
+              '手机扫码进来看到的就是它（当前上游 ' +
+              ((webui.data && webui.data.phone_upstream) || '—') +
+              '）。选哪个都一样：先过配对门禁，没批准的设备连登录界面都看不到。'
           }),
           webuiMsg ? jsx('div', { style: webuiMsg.ok ? S.okMsg : S.warnMsg, children: webuiMsg.text }) : null,
           jsx('span', {

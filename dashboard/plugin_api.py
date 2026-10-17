@@ -610,6 +610,14 @@ PAIR_TTL_SECONDS = 600.0      # 配对链接有效期
 PAIR_APPROVE_WINDOW = 120.0   # 批准后手机必须在这段时间内 claim
 _PAIR: Dict[str, Any] = {"proc": None, "log": None}
 
+# 手机页面落到哪个上游（用户原话「用三方 webui」）：默认就是第三方网页版。
+#   webui = 第三方 WebUI（界面本来就是给手机做的，端口 8787）
+#   panel = 插件自带的桌面面板（老行为，默认端口 9119）
+# 不管选哪个，前面都还是 cloudflared → 9121 配对门禁：上游只影响「进了门之后看到谁」。
+PHONE_PAGES = ("webui", "panel")
+PHONE_PAGE_DEFAULT = "webui"
+PHONE_PAGE_CN = {"webui": "网页版 WebUI", "panel": "自带面板"}
+
 
 def _pair_dir() -> Path:
     base = os.environ.get("LOCALAPPDATA") or os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".hermes")
@@ -620,6 +628,72 @@ def _pair_dir() -> Path:
 
 def _pair_state_path() -> Path:
     return _pair_dir() / "pair.json"
+
+
+def _phone_page_path() -> Path:
+    return _pair_dir() / "phone-page.json"
+
+
+def _phone_page() -> str:
+    """手机页面用哪个上游。读不到/写坏了都退回默认（网页版）。"""
+    try:
+        data = json.loads(_phone_page_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return PHONE_PAGE_DEFAULT
+    value = str((data or {}).get("page") or "").strip().lower() if isinstance(data, dict) else ""
+    return value if value in PHONE_PAGES else PHONE_PAGE_DEFAULT
+
+
+def _phone_page_set(page: str) -> str:
+    """存下「手机页面」的选择。只有两个合法值，别的直接怼回去。"""
+    value = (page or "").strip().lower()
+    if value not in PHONE_PAGES:
+        raise HTTPException(400, detail="手机页面只支持 webui（网页版）或 panel（自带面板）")
+    path = _phone_page_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"page": value}), encoding="utf-8")
+    return value
+
+
+def _panel_port() -> int:
+    """自带面板端口：面板 config 里 dashboard.port，读不到用 DEFAULT_PORT。"""
+    try:
+        from hermes_cli.config import load_config  # noqa: PLC0415
+
+        dash = (load_config() or {}).get("dashboard")
+        raw = str(dash.get("port") or "").strip() if isinstance(dash, dict) else ""
+    except Exception:                                  # noqa: BLE001 配置读不到不该让门禁起不来
+        raw = ""
+    return int(raw) if raw.isdigit() else DEFAULT_PORT
+
+
+def _phone_upstream(panel_port: Optional[int] = None, ensure: bool = True) -> int:
+    """手机页面落到哪个端口。
+
+    ensure=True（起反代时）：选了网页版但网页版没跑，就顺手拉起来 —— 手机页面就是它，
+    不拉起来等于门开了里面没人。
+    ensure=False（只看状态）：不做任何副作用，没找到目录就返回 0。
+    """
+    panel = int(panel_port or 0) or _panel_port()
+    if _phone_page() != "webui":
+        return panel
+    webui_dir = _webui_dir()
+    if not webui_dir:
+        if ensure:
+            raise HTTPException(400, detail="手机页面设成了「网页版 WebUI」，但没找到它的目录（要找 bootstrap.py + .env）")
+        return 0
+    port = _webui_port(webui_dir)
+    if ensure and not _port_open(port):
+        _webui_start(webui_dir)
+    return port
+
+
+def _phone_upstream_label() -> str:
+    try:
+        port = _phone_upstream(ensure=False)
+    except Exception:                                  # noqa: BLE001 状态查询出错就当不知道
+        return ""
+    return ("127.0.0.1:%d" % port) if port else ""
 
 
 def _pair_read() -> Dict[str, Any]:
@@ -734,23 +808,39 @@ def _kill_stale_pair_proxy() -> None:
         time.sleep(0.25)
 
 
-def _start_pair_proxy(port: int) -> None:
-    """起配对反代；已经在跑（或端口已有人听）就不动它。"""
+def _pair_upstream_ok(port: int) -> bool:
+    """在跑的反代，透传目标是不是我们现在要的那个上游。
+
+    切了「手机页面」（网页版 ⇄ 自带面板）就得换掉它 —— 反代只在启动时读一次上游。
+    """
+    info = _pair_proxy_probe()
+    return str(info.get("upstream") or "") == "127.0.0.1:%d" % port
+
+
+def _start_pair_proxy(port: Optional[int] = None) -> None:
+    """起配对反代；已经在跑、版本对、上游也对，就不动它。
+
+    ``port`` 是自带面板端口；手机页面选网页版时上游自动换成网页版的端口。门禁
+    （cloudflared → 9121）永远在最前面，换上游只改「进了门之后看到谁」。
+    """
+    upstream = _phone_upstream(port)
     proc = _PAIR.get("proc")
     if proc is not None and proc.poll() is None:
-        return
-    if _port_open(PAIR_PORT):
-        if _pair_proxy_current():
+        if _pair_upstream_ok(upstream):
+            return
+        _kill_stale_pair_proxy()   # 上游换了（手机页面切成网页版 / 切回自带面板）
+    elif _port_open(PAIR_PORT):
+        if _pair_proxy_current() and _pair_upstream_ok(upstream):
             _PAIR["proc"] = None
             return
-        _kill_stale_pair_proxy()   # 旧代码反代：手机扫码会一直「链接已失效」，换掉
+        _kill_stale_pair_proxy()   # 旧代码反代 / 上游不对：手机扫码会一直「链接已失效」，换掉
     log = _pair_log_path()
     log.parent.mkdir(parents=True, exist_ok=True)
     flags = 0
     if os.name == "nt":
         flags = int(getattr(subprocess, "CREATE_NO_WINDOW", 0)) | int(getattr(subprocess, "DETACHED_PROCESS", 0))
     env = dict(os.environ)
-    env.update(HPR_PORT=str(PAIR_PORT), HPR_UPSTREAM="127.0.0.1:%d" % port, HPR_STATE=str(_pair_state_path()))
+    env.update(HPR_PORT=str(PAIR_PORT), HPR_UPSTREAM="127.0.0.1:%d" % upstream, HPR_STATE=str(_pair_state_path()))
     # 已批准的设备透传时注入可信身份头：网页版（第三方 WebUI）认这个头就免密放行，
     # 手机侧因此不需要知道网页版密码。值取面板登录名；外部设备伪造不了同名头 ——
     # 反代只跑在本机，且 _with_identity() 会把客户端自带的同名头剥掉再自己写一份。
@@ -852,6 +942,9 @@ def pair_status() -> Dict[str, Any]:
         "tunnel": tunnel,
         "tunnel_running": bool(snap.get("running")),
         "log": str(_pair_log_path()),
+        "phone_page": _phone_page(),
+        "phone_page_cn": PHONE_PAGE_CN.get(_phone_page(), ""),
+        "phone_upstream": _phone_upstream_label(),
         "links": _pair_links(tunnel),
     }
 
@@ -1194,6 +1287,9 @@ def _webui_snapshot() -> Dict[str, Any]:
         "trusted_cidrs": str(env.get("HERMES_WEBUI_TRUSTED_PROXY_CIDRS") or ""),
         "python": _webui_python(webui_dir),
         "log": str(_webui_log_path(webui_dir)),
+        "phone_page": _phone_page(),
+        "phone_page_cn": PHONE_PAGE_CN.get(_phone_page(), ""),
+        "phone_upstream": _phone_upstream_label(),
     }
 
 
@@ -1224,6 +1320,7 @@ class WebuiBody(BaseModel):
     action: Optional[str] = None          # save | start | stop | restart
     host: Optional[str] = None
     port: Optional[int] = None
+    phone_page: Optional[str] = None      # webui（默认，第三方网页版）| panel（自带面板）
 
 
 @router.get("/webui")
@@ -1259,6 +1356,24 @@ def webui(body: WebuiBody) -> Dict[str, Any]:
             _webui_set_env(webui_dir, updates)
         except OSError as exc:
             raise HTTPException(500, detail="写 .env 失败：%s" % exc)
+
+    # 「手机页面」选择：手机扫码进来看到的是谁 —— 网页版（默认）还是自带面板。
+    # 存下之后顺手把门禁反代换掉（反代只在启动时读一次上游），失败也不慌：反代下次起会跟上。
+    page = (body.phone_page or "").strip().lower()
+    if page:
+        page = _phone_page_set(page)
+        pair: Dict[str, Any] = {"ok": True, "upstream": _phone_upstream_label()}
+        try:
+            _start_pair_proxy()
+        except HTTPException as exc:
+            pair = {"ok": False, "detail": str(exc.detail)}
+        payload: Dict[str, Any] = {"ok": True, "action": "phone-page", "phone_page": page, "pair": pair}
+        if _webui_running(webui_dir) and not pair.get("ok"):
+            payload["detail"] = "选择已保存，但门禁上游没换过来：%s" % pair.get("detail")
+        else:
+            payload["detail"] = "手机页面 → %s（上游 %s）" % (PHONE_PAGE_CN.get(page, page), pair.get("upstream") or pair.get("detail") or "")
+        payload.update(_webui_snapshot())
+        return payload
 
     if action == "stop":
         killed = _webui_stop(webui_dir)

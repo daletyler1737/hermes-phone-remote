@@ -376,7 +376,8 @@ def _serve_pair(conn: socket.socket, target: str, headers: bytes, body: bytes = 
             deps = True
         except Exception:
             deps = False
-        return _json(conn, {"mtime": _CODE_MTIME, "pid": os.getpid(), "deps": deps})
+        return _json(conn, {"mtime": _CODE_MTIME, "pid": os.getpid(), "deps": deps,
+                            "upstream": "%s:%d" % (UPSTREAM[0], UPSTREAM[1])})
     if path == "/pair/login":
         return _serve_login(conn, token, headers, body)
     with _lock:
