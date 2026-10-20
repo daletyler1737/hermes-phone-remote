@@ -483,6 +483,8 @@ def _cloudflared_exe() -> str:
         Path(__file__).with_name(exe),                                              # 插件自带
         Path.home() / ".cloudflared" / exe,
         Path(os.environ.get("APPDATA", "") or ".") / "dsh-desktop" / "bin" / exe,   # DSH Desktop 自带的那份
+        # DSH npm install (node_modules/cloudflared/bin/) — 实测这份比官方下载的 subsystem=0 能直接跑
+        Path.home() / ".dsh" / "profiles" / "desktop" / "node_modules" / "cloudflared" / "bin" / exe,
     ]
     found = shutil.which("cloudflared")
     if found:
@@ -1341,6 +1343,8 @@ def webui(body: WebuiBody) -> Dict[str, Any]:
 
     action = (body.action or "").strip().lower()
     password = (body.password or "").strip()
+    # 「手机页面」选择：手机扫码进来看到的是谁 —— 网页版（默认）还是自带面板。
+    page = (body.phone_page or "").strip().lower()
     updates: Dict[str, str] = {}
     if password:
         problem = password_problem(password)
@@ -1351,15 +1355,24 @@ def webui(body: WebuiBody) -> Dict[str, Any]:
         updates["HERMES_WEBUI_PORT"] = str(int(body.port))
     if body.host:
         updates["HERMES_WEBUI_HOST"] = body.host.strip()
+    elif page == "webui":
+        # 手机要能直接扫局域网地址进网页版 → 不能只绑回环（回环只有本机看得见）
+        updates["HERMES_WEBUI_HOST"] = "0.0.0.0"
     if updates:
         try:
             _webui_set_env(webui_dir, updates)
         except OSError as exc:
             raise HTTPException(500, detail="写 .env 失败：%s" % exc)
 
-    # 「手机页面」选择：手机扫码进来看到的是谁 —— 网页版（默认）还是自带面板。
-    # 存下之后顺手把门禁反代换掉（反代只在启动时读一次上游），失败也不慌：反代下次起会跟上。
-    page = (body.phone_page or "").strip().lower()
+    # host / 端口 / 密码都是启动时读进内存的 → 改了得重启才生效
+    restarted: Dict[str, Any] = {}
+    if updates and action not in ("start", "restart") and _webui_running(webui_dir):
+        try:
+            restarted = _webui_restart(webui_dir)
+        except HTTPException as exc:
+            restarted = {"restart_error": str(exc.detail)}
+
+    # 存下选择之后顺手把门禁反代换掉（反代只在启动时读一次上游），失败也不慌：反代下次起会跟上。
     if page:
         page = _phone_page_set(page)
         pair: Dict[str, Any] = {"ok": True, "upstream": _phone_upstream_label()}
@@ -1368,6 +1381,7 @@ def webui(body: WebuiBody) -> Dict[str, Any]:
         except HTTPException as exc:
             pair = {"ok": False, "detail": str(exc.detail)}
         payload: Dict[str, Any] = {"ok": True, "action": "phone-page", "phone_page": page, "pair": pair}
+        payload.update(restarted)
         if _webui_running(webui_dir) and not pair.get("ok"):
             payload["detail"] = "选择已保存，但门禁上游没换过来：%s" % pair.get("detail")
         else:
@@ -1390,9 +1404,11 @@ def webui(body: WebuiBody) -> Dict[str, Any]:
 
     # 没点名 action：写密码后按需重启（密码是启动时读进内存的，不重启不生效）
     payload = {"ok": True, "action": "save" if updates else "status", "changed": sorted(updates)}
-    if password and _webui_running(webui_dir):
-        payload.update(_webui_restart(webui_dir))
-        payload["detail"] = "密码已写入并重启生效"
+    payload.update(restarted)
+    if restarted.get("restart_error"):
+        payload["detail"] = "已写入 .env，但网页版重启失败（下次启动生效）"
+    elif updates and restarted:
+        payload["detail"] = "已写入并重启生效"
     elif updates:
         payload["detail"] = "已写入 .env（网页版没在跑，下次启动生效）"
     payload.update(_webui_snapshot())

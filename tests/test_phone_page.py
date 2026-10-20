@@ -81,6 +81,11 @@ with tempfile.TemporaryDirectory() as tmp:
     assert m._webui_snapshot()["phone_page"] == "webui", m._webui_snapshot()
     assert res["phone_upstream"] == "127.0.0.1:%d" % WPORT, res
 
+    # 5b) 选网页版 → 网页版必须放开到局域网（只绑回环手机在同网段扫不到那个码）
+    envtext = (webui / ".env").read_text(encoding="utf-8")
+    assert "HERMES_WEBUI_HOST=0.0.0.0" in envtext, envtext
+    assert m._webui_snapshot()["host"] == "0.0.0.0", m._webui_snapshot()
+
     # 6) 没找到网页版目录：起反代要报 400（别悄悄把门开给空气），只读状态只是「不知道」
     m.WEBUI_DIR_CANDIDATES = (str(tmpd / "nope"),)
     assert m._phone_upstream(ensure=False) == 0
@@ -94,4 +99,4 @@ with tempfile.TemporaryDirectory() as tmp:
     m._phone_page_set("panel")
     assert m._phone_upstream() == 9119, m._phone_upstream()
 
-print("OK 手机页面（门禁上游）7 项通过")
+print("OK 手机页面（门禁上游）8 项通过")

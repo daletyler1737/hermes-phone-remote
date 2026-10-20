@@ -2941,7 +2941,10 @@ function PhonePage({ ctx }) {
   const pwUrl = ((pair.links || {}).password || {}).url || ''
 
 
-  const link = 'http://' + cfg.ip + ':' + cfg.port + '/'
+  // 手机页面选「网页版」→ 手机连的是网页版端口（8787），不是面板端口
+  const phonePage = (webui.data && webui.data.phone_page) || 'webui'
+  const phonePort = phonePage === 'webui' ? Number((webui.data && webui.data.port) || 8787) : Number(cfg.port) || 9119
+  const link = 'http://' + cfg.ip + ':' + phonePort + '/'
   const localLink = 'http://127.0.0.1:' + cfg.port + '/'
   const d = draft || cfg
 
@@ -3198,8 +3201,6 @@ function PhonePage({ ctx }) {
       : '还没有手机登录过'
 
   const webuiUp = !!(webui.data && webui.data.running)
-  // 手机页面落到哪个上游（后端存着，前端只负责显示和切换）
-  const phonePage = (webui.data && webui.data.phone_page) || 'webui'
   const webuiText =
     webui.phase === 'loading'
       ? '读取中…'
@@ -3451,7 +3452,12 @@ function PhonePage({ ctx }) {
                         ? '手机（4G/5G 也行）扫左边的码，直接落到登录页；也可手动打开下面的地址'
                         : '手机相机 / 微信「扫一扫」对准左边的二维码'
                   }),
-                  jsx('li', { children: '首次打开输入下面这组账号密码，勾选「记住我」' }),
+                  jsx('li', {
+                    children:
+                      phonePage === 'webui'
+                        ? '首次打开输入下面这串密码（和面板是同一个），勾选「记住我」'
+                        : '首次打开输入下面这组账号密码，勾选「记住我」'
+                  }),
                   jsx('li', { children: '以后手机上就能聊天、切会话、看历史，和电脑端同一套会话' })
                 ]
               }),
@@ -3469,17 +3475,20 @@ function PhonePage({ ctx }) {
                   os.notify(ok ? '已复制手机访问地址' : '复制失败，请手动选中地址', ok ? 'info' : 'warn')
                 }
               }),
-              jsx(Field, {
-                label: '账号',
-                value: cfg.user,
-                onCopy: async () => {
-                  const ok = await os.copy(cfg.user)
-                  os.notify(ok ? '已复制账号' : '复制失败', ok ? 'info' : 'warn')
-                }
-              }),
+              // 网页版登录只要密码（和面板同一个），面板模式才要账号
+              phonePage === 'webui'
+                ? null
+                : jsx(Field, {
+                    label: '账号',
+                    value: cfg.user,
+                    onCopy: async () => {
+                      const ok = await os.copy(cfg.user)
+                      os.notify(ok ? '已复制账号' : '复制失败', ok ? 'info' : 'warn')
+                    }
+                  }),
               jsx(Field, {
                 label: '密码',
-                value: cfg.pass,
+                value: phonePage === 'webui' ? ((webui.data && webui.data.password) || cfg.pass) : cfg.pass,
                 secret: true,
                 revealed,
                 onToggle: () => setRevealed(!revealed),
@@ -3619,7 +3628,11 @@ function PhonePage({ ctx }) {
             children:
               webui.data && webui.data.found === false
                 ? webui.data.detail || '没找到网页版目录'
-                : '本机地址 ' + (webui.data && webui.data.url ? webui.data.url : '') + '（只绑回环，同网段看不到）'
+                : '本机地址 ' +
+                  (webui.data && webui.data.url ? webui.data.url : '') +
+                  (webui.data && webui.data.host === '0.0.0.0'
+                    ? ' · 已允许同网段访问（手机扫上面的码直接进网页版）'
+                    : '（只绑回环，同网段看不到）')
           }),
           jsxs('div', {
             style: S.field,
