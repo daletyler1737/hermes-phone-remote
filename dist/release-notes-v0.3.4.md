@@ -13,8 +13,8 @@ names the port it actually probed.
 ## SHA256
 
 ```
-5d9edbb7f95b8081747f3320bff305df50d3d31f6be9845214abe3a3dbb91c07  phone-remote-v0.3.4-plugin.zip
-70826233d5be58d3198e6ddf5d97a636451ba2bbfc0d4e3480cfb3b51ae4d570  phone-remote-v0.3.3-to-v0.3.4-update.zip
+811e07c4b0dae2cd5ff3f6a4dc60163f6ba396b6e8cb0ce94e1219badfe61dcc  phone-remote-v0.3.4-plugin.zip
+1625a6cbc7363c9232e51bf5a7fc4f7084c7928fb544bfc39b828eabd7ae938c  phone-remote-v0.3.3-to-v0.3.4-update.zip
 ```
 
 ---
@@ -32,6 +32,6 @@ v0.3.3 把局域网卡（二维码/地址/密码）换到了网页版端口，�
 ## SHA256
 
 ```
-5d9edbb7f95b8081747f3320bff305df50d3d31f6be9845214abe3a3dbb91c07  phone-remote-v0.3.4-plugin.zip
-70826233d5be58d3198e6ddf5d97a636451ba2bbfc0d4e3480cfb3b51ae4d570  phone-remote-v0.3.3-to-v0.3.4-update.zip
+811e07c4b0dae2cd5ff3f6a4dc60163f6ba396b6e8cb0ce94e1219badfe61dcc  phone-remote-v0.3.4-plugin.zip
+1625a6cbc7363c9232e51bf5a7fc4f7084c7928fb544bfc39b828eabd7ae938c  phone-remote-v0.3.3-to-v0.3.4-update.zip
 ```
