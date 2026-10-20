@@ -648,10 +648,13 @@ function PhonePage({ ctx }) {
   const phonePage = (webui.data && webui.data.phone_page) || 'webui'
   const phonePort = phonePage === 'webui' ? Number((webui.data && webui.data.port) || 8787) : Number(cfg.port) || 9119
   const link = 'http://' + cfg.ip + ':' + phonePort + '/'
-  const localLink = 'http://127.0.0.1:' + cfg.port + '/'
+  const localLink = 'http://127.0.0.1:' + phonePort + '/'
   const d = draft || cfg
 
-  const [status, recheck] = useServiceStatus('http://127.0.0.1:' + cfg.port + '/api/status')
+  // 探测也跟着手机页面走：网页版探它自己的端口，别再拿 9119 的死活说事
+  const [status, recheck] = useServiceStatus(
+    phonePage === 'webui' ? 'http://127.0.0.1:' + phonePort + '/' : 'http://127.0.0.1:' + cfg.port + '/api/status'
+  )
 
   // 只在挂载时探测一次本机内网 IP；探测失败就什么都不显示，用户仍能手填。
   useEffect(() => {
@@ -931,7 +934,7 @@ function PhonePage({ ctx }) {
       ? '服务运行中 · ' + localLink
       : status.phase === 'checking'
         ? '正在检测服务…'
-        : '未检测到服务（9119 没在跑，或浏览器拦了探测）'
+        : '未检测到服务（' + phonePort + ' 没在跑，或浏览器拦了探测）'
 
   return jsxs('div', {
     style: S.root,
