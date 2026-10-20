@@ -3204,6 +3204,8 @@ function PhonePage({ ctx }) {
       : '还没有手机登录过'
 
   const webuiUp = !!(webui.data && webui.data.running)
+  // 网页版那串和面板是不是同一个密码（后端真去验 hash，前端只负责说人话）
+  const webuiBound = !!(webui.data && webui.data.bound)
   const webuiText =
     webui.phase === 'loading'
       ? '读取中…'
@@ -3491,7 +3493,10 @@ function PhonePage({ ctx }) {
                   }),
               jsx(Field, {
                 label: '密码',
-                value: phonePage === 'webui' ? ((webui.data && webui.data.password) || cfg.pass) : cfg.pass,
+                value:
+                  phonePage === 'webui' || webuiBound
+                    ? (webui.data && webui.data.password) || cfg.pass
+                    : cfg.pass,
                 secret: true,
                 revealed,
                 onToggle: () => setRevealed(!revealed),
@@ -3666,12 +3671,14 @@ function PhonePage({ ctx }) {
                 onClick: doWebuiCopy,
                 children: '复制'
               }),
-              jsx(Button, {
-                variant: 'secondary',
-                size: 'sm',
-                onClick: () => doWebui('bind'),
-                children: webuiBusy === 'bind' ? '绑定中…' : '与面板密码绑定'
-              }),
+              webuiBound
+                ? jsx('span', { style: S.okMsg, children: '✓ 已与面板同一个密码' })
+                : jsx(Button, {
+                    variant: 'secondary',
+                    size: 'sm',
+                    onClick: () => doWebui('bind'),
+                    children: webuiBusy === 'bind' ? '绑定中…' : '与面板密码绑定'
+                  }),
               jsx(Button, {
                 variant: 'outline',
                 size: 'sm',

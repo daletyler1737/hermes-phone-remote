@@ -1269,6 +1269,37 @@ def _webui_restart(webui_dir: Path) -> Dict[str, Any]:
     return {"killed": killed, "pid": pid, "running": True}
 
 
+def _panel_hash_ok(password: str, stored: str) -> bool:
+    """这串密码能不能过这串 scrypt hash（纯函数，单测直接怼）。
+
+    ponytail: 只认官方写的 ``scrypt$n$r$p$salt$digest`` 格式；别的格式一律当「没绑定」，
+    不猜 —— 猜错的表现是「显示已绑定其实登不上」，比报未绑定更难查。
+    """
+    if not (password and stored):
+        return False
+    try:
+        import base64, hashlib, hmac  # noqa: PLC0415
+        algo, n, r, p, salt, digest = stored.split("$")
+        if algo != "scrypt":
+            return False
+        salt_b, dk_b = base64.b64decode(salt), base64.b64decode(digest)
+        dk = hashlib.scrypt(password.encode(), salt=salt_b, n=int(n), r=int(r), p=int(p),
+                            dklen=len(dk_b), maxmem=64 * 1024 * 1024)
+        return hmac.compare_digest(dk, dk_b)
+    except Exception:                       # noqa: BLE001 —— 坏 hash / 缺字段 → 当作没绑定
+        return False
+
+
+def _panel_bound(password: str) -> bool:
+    """网页版那串能不能直接登面板（= 两处是不是同一个密码）。"""
+    try:
+        from hermes_cli.config import load_config  # noqa: PLC0415
+        stored = str(_basic_auth(load_config() or {}).get("password_hash") or "")
+    except Exception:                       # noqa: BLE001
+        return False
+    return _panel_hash_ok(password, stored)
+
+
 def _webui_snapshot() -> Dict[str, Any]:
     webui_dir = _webui_dir()
     if not webui_dir:
@@ -1285,6 +1316,7 @@ def _webui_snapshot() -> Dict[str, Any]:
         "url": "http://127.0.0.1:%d/" % port,
         "password": password,
         "password_set": bool(password),
+        "bound": _panel_bound(password),          # 这串能不能当面板密码用
         "trusted_header": str(env.get("HERMES_WEBUI_TRUSTED_AUTH_HEADER") or ""),
         "trusted_cidrs": str(env.get("HERMES_WEBUI_TRUSTED_PROXY_CIDRS") or ""),
         "python": _webui_python(webui_dir),

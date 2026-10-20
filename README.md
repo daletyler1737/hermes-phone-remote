@@ -16,11 +16,14 @@ Two modes:
 
 ## Status
 
-**v0.3.3** (2026-10). Working, verified end-to-end: LAN login, scan-to-pair over a real
+**v0.3.5** (2026-10). Working, verified end-to-end: LAN login, scan-to-pair over a real
 Cloudflare tunnel, byte-identical assets through the tunnel, panel one-step self-restart,
 one-click **Close panel**, and pairing QR codes that **renew themselves** when the 10-minute
 token expires (the card never turns into a dead code).
 Since v0.3.1 the third-party **WebUI login password is bound to the panel password** — one string for both.
+Since v0.3.5 **the password binding is verified, not assumed**: the backend checks the
+WebUI password against the panel's scrypt hash and the card says "已与面板同一个密码" only
+when it really matches (otherwise it offers the bind button again).
 Since v0.3.3 the **LAN card follows the phone page**: with the WebUI selected the QR code,
 the address and the password shown in the plugin all point at the WebUI port (8787) instead of
 the panel port, and the WebUI is opened up to the local network so the phone can reach it.
